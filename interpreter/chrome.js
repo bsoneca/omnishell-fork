@@ -125,7 +125,7 @@ export function guestBox(doc, cfg) {
  * label, and aria-current names the link that IS this page — which is the
  * link whose address is this one (`here`, a pathname), not merely a link to
  * the same route with someone else's :params. */
-export function localizeStrip(nav, cfg, { locale, here, messages, explicitLocale = false } = {}) {
+export function localizeStrip(nav, cfg, { locale, here, search = "", messages, explicitLocale = false } = {}) {
   if (!nav) return;
   for (const a of nav.querySelectorAll("a[data-route]")) {
     const href = routeHref(cfg, a.getAttribute("data-route"), routeParams(a), locale, { explicitLocale });
@@ -154,7 +154,7 @@ export function localizeStrip(nav, cfg, { locale, here, messages, explicitLocale
   // The provider brings the reader back to the page they left, in its language.
   for (const a of nav.querySelectorAll(".shell-provider")) {
     a.textContent = chromeText(a.getAttribute("data-key"), { messages, locale });
-    if (here !== undefined) a.setAttribute("href", providerHref(cfg.auth.service, a.getAttribute("data-provider"), here));
+    if (here !== undefined) a.setAttribute("href", providerHref(cfg.auth.service, a.getAttribute("data-provider"), here + search));
   }
 }
 

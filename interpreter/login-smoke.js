@@ -52,7 +52,7 @@ const SCREEN_HTML = `<section class="screen" data-screen="home"><h2>Home</h2></s
 
 // `cookie` is the jar the auth service left; `provider` answers its session
 // exchange with a status, and the requests the boot made are in `asked`.
-function boot({ config = CONFIG_YAML, catalogue = null, guestFails = false, cookie = "", provider = 200 } = {}) {
+function boot({ config = CONFIG_YAML, catalogue = null, guestFails = false, cookie = "", provider = 200, expiredToken = null } = {}) {
   const { document, Event } = parseHTML(
     "<!doctype html><html><head></head><body><div id=shell></div></body></html>",
   );
@@ -87,7 +87,10 @@ function boot({ config = CONFIG_YAML, catalogue = null, guestFails = false, cook
       return Promise.resolve(new Response(JSON.stringify({ token: "g", user: { id: "u-google", handle: "amber-fox-12" } })));
     }
     if (u.endsWith("/auth/oidc/signout")) return Promise.resolve(new Response(null, { status: 204 }));
-    if (u.includes("/crud/app_user")) return Promise.resolve(new Response(JSON.stringify([{ id: "u-google" }])));
+    if (u.includes("/crud/app_user")) {
+      if (expiredToken && init?.headers?.Authorization === `Bearer ${expiredToken}`) return Promise.resolve(new Response("{}", { status: 401 }));
+      return Promise.resolve(new Response(JSON.stringify([{ id: "u-google" }])));
+    }
     if (u.endsWith("shell.yaml")) return Promise.resolve(new Response(config));
     if (u.endsWith("/auth/guest")) {
       if (guestFails) return Promise.resolve(new Response("the door is bolted", { status: 500 }));
@@ -127,7 +130,10 @@ Deno.test({
     };
     const form = mount.querySelector(".shell-login form");
     assert(form, "login form rendered");
-    assert(form.querySelector("h1").textContent === "smoke", "app title shown");
+    assert(form.getAttribute("aria-labelledby") === "shell-login-title", "the form is named by the app heading");
+    assert(form.querySelector(".login-error").getAttribute("role") === "alert", "ceremony failures are announced");
+    assert(mount.querySelector(".login-mark").getAttribute("aria-hidden") === "true", "the decorative mark is silent");
+    assert(mount.querySelector("h1").textContent === "smoke", "app title shown");
     // Usernameless one-gesture doctrine: a single Continue drives login with
     // registration as the fall-through, and the guest door is always beside it
     // (origin-independent by doctrine) — any other button set is a regression.
@@ -158,12 +164,15 @@ Deno.test({
     };
     const form = mount.querySelector(".shell-login form");
     assert(form, "login form rendered");
+    assert(form.getAttribute("aria-labelledby") === "shell-login-title", "the form is named by the app heading");
+    assert(form.querySelector(".login-error").getAttribute("role") === "alert", "ceremony failures are announced");
+    assert(mount.querySelector(".login-mark").getAttribute("aria-hidden") === "true", "the decorative mark is silent");
     // The gate is up before any route is mounted, so it resolves its own
     // language off the address — and its catalogue has to be in hand before the
     // auth branch runs, not after it beside the screens.
     assert(
-      form.querySelector(".login-hint").textContent === CATALOGUE.chrome_signin_hint,
-      `the hint reads ${JSON.stringify(form.querySelector(".login-hint").textContent)}`,
+      mount.querySelector(".login-hint").textContent === CATALOGUE.chrome_signin_hint,
+      `the hint reads ${JSON.stringify(mount.querySelector(".login-hint").textContent)}`,
     );
     const labels = [...form.querySelectorAll("button")].map((b) => b.textContent);
     assert(
@@ -263,7 +272,11 @@ Deno.test({
     const assert = check(mount);
     const form = mount.querySelector(".shell-login form");
     assert(form, "login form rendered");
+    assert(form.getAttribute("aria-labelledby") === "shell-login-title", "the form is named by the app heading");
+    assert(form.querySelector(".login-error").getAttribute("role") === "alert", "ceremony failures are announced");
+    assert(mount.querySelector(".login-mark").getAttribute("aria-hidden") === "true", "the decorative mark is silent");
     const google = form.querySelector(".login-provider");
+    assert(form.querySelector(".login-actions").firstElementChild.matches(".login-provider"), "providers lead the action hierarchy");
     assert(google?.textContent === "Continue with Google", `the provider's word, got ${google?.textContent}`);
     assert(
       google.getAttribute("href") === "/auth/oidc/google/start?return=%2F%3Fpage%3D2",
@@ -319,7 +332,7 @@ Deno.test({
     }
     {
       const { mount, asked } = boot({ config: PROVIDER_YAML, cookie: "mecha_oidc_hint=google" });
-      sessionStorage.setItem("pronto-token", JSON.stringify({ token: "p", user: { id: "u-google", handle: "passkey-held" } }));
+      sessionStorage.setItem("pronto-token", JSON.stringify({ token: `p.${btoa(JSON.stringify({ sub: "u-passkey" }))}.s`, user: { id: "u-passkey", handle: "passkey-held" } }));
       const { createShell } = await import("./shell.js");
       createShell({ config: "./shell.yaml", mount });
       await settle(200);
@@ -342,4 +355,26 @@ Deno.test("a guest's strip offers each provider, its address written with the pa
   if (a.getAttribute("href") !== "/auth/oidc/google/start?return=%2Fchapter%2F8") throw new Error(`smoke failed: got ${a.getAttribute("href")}`);
   // No passkey was offered, so none is drawn.
   if (nav.querySelector(".shell-signin")) throw new Error("smoke failed: a passkey nobody offered");
+});
+
+Deno.test({
+  name: "a provider cookie renews an expired bearer before the first boot gates or mints a guest",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const token = `e.${btoa(JSON.stringify({ sub: "u-google", exp: 1 }))}.s`;
+    for (const config of [PROVIDER_YAML, PROVIDER_YAML.replace("required: true", "required: false").replace("tables: []", "tables: [example]\nread: [example]")]) {
+      const { mount, asked } = boot({ config, cookie: "mecha_oidc_hint=google", expiredToken: token });
+      sessionStorage.setItem("pronto-token", JSON.stringify({ token, user: { id: "u-google" } }));
+      const { createShell } = await import("./shell.js");
+      createShell({ config: "./shell.yaml", mount });
+      await settle(200);
+      const assert = check(mount);
+      assert(!mount.querySelector(".shell-login"), "the provider renews without a login gate");
+      assert(mount.querySelector('[data-screen="home"]'), "the screen is up");
+      assert(asked.includes("POST /auth/oidc/session"), `asked ${asked}`);
+      assert(!asked.includes("POST /auth/guest"), `asked ${asked}`);
+      assert(JSON.parse(sessionStorage.getItem("pronto-token")).token === "g", "the expired bearer was replaced");
+    }
+  },
 });

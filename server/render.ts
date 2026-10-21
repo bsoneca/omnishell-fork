@@ -275,6 +275,19 @@ export async function keepGuest(
 }
 
 /**
+ * Every fetch the renderer makes goes to its door, and none outlives `ms`: the
+ * door's own bound on its upstreams is shorter, and the bound of whatever
+ * proxies the render is longer (pronto's resilience package holds all three).
+ */
+export function boundedFetch(fetch: typeof globalThis.fetch, ms: number): typeof globalThis.fetch {
+  return (input, init) => {
+    const limit = AbortSignal.timeout(ms);
+    const own = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+    return fetch(input, { ...init, signal: own ? AbortSignal.any([own, limit]) : limit });
+  };
+}
+
+/**
  * The request-only reads a render makes, recorded as the store makes them: the
  * body of each GET the door's /crud answers with success, under its path and
  * query, and nothing of how it was asked. The renderer reads as a guest, so a
@@ -345,6 +358,8 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   const capacity = Number(env("RENDER_CAPACITY") ?? "512");
   const queue = Number(env("RENDER_QUEUE") ?? "64");
   const port = Number(env("PORT") ?? "8090");
+  const doorTimeout = Number(env("DOOR_TIMEOUT_MS"));
+  if (!(doorTimeout > 0)) throw new Error(`DOOR_TIMEOUT_MS is ${env("DOOR_TIMEOUT_MS")}: the renderer bounds every read through its door`);
 
   // Whatever ends the renderer says why, and exits so whatever runs it can
   // start it again.
@@ -353,6 +368,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
     Deno.exit(1);
   };
   inhabit(door, die);
+  globalThis.fetch = boundedFetch(globalThis.fetch, doorTimeout);
 
   const read = async (path: string) => {
     const res = await fetch(`${door}${path}`);
@@ -368,7 +384,6 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   const { routeAt } = await import("../interpreter/shell.js");
   const { carryReads, createStore, readKey, servedReadsScript } = await import("../interpreter/data-sync.js");
   const { compileCatalog } = await import("../interpreter/vendor/messages.js");
-  const { templateHash } = await import("../interpreter/screen.js");
 
   const cfg = await (await read("/shell/shell.json")).json();
   // The entry is the one file read off the image rather than through the
@@ -378,11 +393,8 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   if (entryPath === undefined) throw new Error("ENTRY names no entry page to render documents from");
   const entry = await Deno.readTextFile(entryPath);
   const messages: Record<string, unknown> = {};
-  const words: Record<string, string> = {};
   for (const tag of Object.keys(cfg.i18n?.locales ?? {})) {
-    const text = await (await read(`/messages/${tag}.json`)).text();
-    messages[tag] = compileCatalog(JSON.parse(text));
-    words[tag] = templateHash(text);
+    messages[tag] = compileCatalog(JSON.parse(await (await read(`/messages/${tag}.json`)).text()));
   }
   // A guest is who a document is rendered for, minted the way a reader's tab
   // mints one. Its token is the store's, through sessionStorage as in a tab.
@@ -399,7 +411,8 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   const reads = recordReads(door, globalThis.fetch, (url) => readKey(url));
   globalThis.fetch = reads.fetch;
   const appBase = new URL(`${door}/`);
-  const store = createStore(door, { ...cfg, appBase });
+  // Every render asks the door for its reads, which its document carries.
+  const store = createStore(door, { ...cfg, appBase, keepReads: false });
   const cacheableRead = (table: string) => cfg.schema?.[table]?.durability !== "server";
 
   const renderer = createRenderer({
@@ -426,7 +439,6 @@ export async function serve(env: (name: string) => string | undefined = (name) =
           written: found.written,
           store: watched,
           messages,
-          words,
           rows: true,
           origin: base.origin,
           here: base.pathname,

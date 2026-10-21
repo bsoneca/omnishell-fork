@@ -21,11 +21,21 @@ import { localeAt, localeTable, ProgramError, routeAt, routeHref, screenEnv, Una
 import { fetchText, interpretScreen, prefetchScreen, templateHash, submitsOnChange } from "./screen.js";
 import { compileCatalog } from "./vendor/messages.js";
 import { planRelease } from "./release-plan.js";
-import { activateRelease, fetchRelease, prepareRestartRelease, readAsset, startupReleaseId } from "./release-assets.js";
 export { routeAt } from "./fragment.js";
-import { assetURL, preloadLinkedScreens, preloadScreen } from "./preloads.js";
+import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
+import { startLinkPrefetch } from "./link-prefetch.js";
 
-const recoveryKey = "pronto-live-update-recovery";
+const recoveryKey = "pronto-release-recovery";
+const releaseKey = (imports) => templateHash(JSON.stringify(imports));
+// How often an open page asks whether a deployment landed, besides whenever it
+// is shown again.
+const RELEASE_CHECK_MS = 5 * 60 * 1000;
+// The worker's copies of entries (offline-first-sw.js), dropped whole when the
+// page restarts into a newer release: each names the older one.
+const ENTRY_CACHE = "pronto-entries-v1";
+// A release's map as served in an entry, read without parsing the document,
+// which the policy's Trusted Types forbid on a string.
+const SERVED_MAP = /<script\b[^>]*\bid="pronto-assets"[^>]*>([\s\S]*?)<\/script>/;
 const sessionOwner = (session) => {
   if (session === null) return null;
   const subject = claimsOf(session.token)?.sub ?? session.user?.id;
@@ -77,8 +87,8 @@ const providerHinted = () => (globalThis.document?.cookie ?? "").split(";").some
 
 /** The browser's provider sign-in as this tab's session, or null. A redirect
  * cannot write sessionStorage, so the provider's return lands here, and so
- * does every tab opened later. Asked only where a guest or nobody holds the
- * tab: a passkey's session is not traded away under the reader. Fails open
+ * does every tab opened later. A live non-guest session keeps its identity;
+ * an expired bearer can be renewed by the longer-lived cookie. Fails open
  * as accountLives does: offline, the tab boots as it would have. */
 async function adoptProviderSession(cfg) {
   if ((cfg.auth?.providers?.length ?? 0) === 0 || !providerHinted()) return null;
@@ -88,11 +98,12 @@ async function adoptProviderSession(cfg) {
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
   }
-  if (held !== null && !held.user?.guest) return null;
+  if (held !== null && !held.user?.guest && await accountLives(held)) return null;
   let res;
   try {
     res = await fetch(`${cfg.auth.service}/oidc/session`, { method: "POST", credentials: "same-origin" });
-  } catch {
+  } catch (error) {
+    if (!(error instanceof TypeError)) throw error;
     return null;
   }
   // Signed out elsewhere, or the link revoked: the hint is stale, and the
@@ -260,12 +271,16 @@ function renderLogin(mount, cfg, chrome) {
   // Every word is written in after the template rather than interpolated into
   // it: a catalogue is app data, and data spliced into markup is an injection
   // seam where a literal was none.
-  wrap.append(parseMarkup(document, `<form>
-    <h1></h1>
-    <p class="login-hint"></p>
-    <p class="login-error" hidden></p>
-    <button type="submit"></button>
-    <button type="button" class="login-guest"></button>
+  wrap.append(parseMarkup(document, `<header class="login-intro">
+    <span class="login-mark" aria-hidden="true"></span>
+    <h1 id="shell-login-title"></h1>
+    <p class="login-hint" id="shell-login-hint"></p>
+  </header><form aria-labelledby="shell-login-title" aria-describedby="shell-login-hint">
+    <p class="login-error" role="alert" hidden></p>
+    <div class="login-actions">
+      <button type="submit" class="login-passkey"></button>
+      <button type="button" class="login-guest"></button>
+    </div>
   </form>`));
   // A provider's way in leaves the page, so it is a link, not a button: the
   // provider brings the reader back to this address, where the boot adopts
@@ -277,9 +292,10 @@ function renderLogin(mount, cfg, chrome) {
     a.dataset.provider = provider;
     a.href = providerHref(cfg.auth.service, provider, here);
     a.textContent = chrome(providerKey(provider));
-    wrap.querySelector(".login-guest").before(a);
+    wrap.querySelector(".login-passkey").before(a);
   }
   wrap.querySelector("h1").textContent = cfg.app;
+  wrap.querySelector(".login-mark").textContent = [...cfg.app][0]?.toLocaleUpperCase() ?? "";
   wrap.querySelector(".login-hint").textContent = chrome("chrome_signin_hint");
   wrap.querySelector("button[type=submit]").textContent = chrome("chrome_signin");
   wrap.querySelector(".login-guest").textContent = chrome("chrome_signin_guest");
@@ -417,16 +433,10 @@ function renderSession(session, cfg, store, signOut, chrome, served = null) {
  * shows the copy it was written with. A request that never answered is no
  * answer: it rejects whoever waits on it, and the next to ask asks again.
  *
- * Offline the worker answers from its copy of a catalogue, which is any deploy old.
- * `settle` takes a served document's witness of the catalogues it is drawn in
- * (document.js) and asks the network past the worker for each this shell holds
- * otherwise, as a screen does for its template: the screen writes its words
- * again on taking the document over, and the older copy would write a newer
- * document back to older words. `heard` takes the worker's announcement of a
- * newer copy once the one asked has landed, so the older cannot land after
- * it; `taken` counts what has been taken, which a screen compares with what it
- * was last written in. */
-function catalogues(appBase, i18n, release = false) {
+ * `heard` takes a newer release's copy once the
+ * one asked has landed, so the older cannot land after it; `taken` counts what
+ * has been taken, which a screen compares with what it was last written in. */
+function catalogues(appBase, i18n) {
   const messages = {};
   const witnessed = {};
   const asked = new Map();
@@ -440,11 +450,8 @@ function catalogues(appBase, i18n, release = false) {
     taken++;
   };
   const load = async (loc, init) => {
-    if (release) take(loc, await readAsset(urlOf(loc)));
-    else {
-      const res = await fetch(assetURL(urlOf(loc)), init);
-      if (res.ok) take(loc, await res.text());
-    }
+    const res = await fetch(assetURL(urlOf(loc)), init);
+    if (res.ok) take(loc, await res.text());
     answered.add(loc);
   };
   const ensure = (loc) => {
@@ -466,11 +473,6 @@ function catalogues(appBase, i18n, release = false) {
     // yield before it mounts, or a second navigation can land between the two.
     answered: (loc) => loc === undefined || !Object.hasOwn(declared, loc) || answered.has(loc),
     all: () => Promise.all(Object.keys(declared).map(ensure)),
-    settle: (witness) =>
-      Promise.all(witness.split(" ").filter(Boolean).map((pair) => {
-        const [loc, hash] = pair.split(":");
-        return Object.hasOwn(witnessed, loc) && witnessed[loc] !== hash ? load(loc, { cache: "no-cache" }) : undefined;
-      })),
     heard: async (pathname, text) => {
       const loc = [...asked.keys()].find((l) => urlOf(l).pathname === pathname);
       if (loc === undefined) return false;
@@ -487,11 +489,11 @@ function catalogues(appBase, i18n, release = false) {
 // `preload: false` for a page that serves the app's files itself (pronto's
 // single-file bundle): a preload goes to the network past the page's own
 // answer, and fetches what nothing reads.
-export async function createShell({ config, mount, liveUpdates = false, preload = true }) {
-  let initialDraftOwner = liveUpdates ? storedSessionOwner() : null;
+export async function createShell({ config, mount, preload = true }) {
+  let initialDraftOwner = storedSessionOwner();
   const editedFields = new WeakSet();
   const morphDrafts = new Map();
-  if (liveUpdates) {
+  {
     for (const type of ["input", "change"]) {
       document.addEventListener(type, (event) => {
         const field = event.target?.closest?.("input, textarea, select, [contenteditable]");
@@ -573,7 +575,7 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
     }
   };
   let gesture = 0;
-  if (liveUpdates) {
+  {
     for (const field of fields(mount)) {
       const changed = !field.isContentEditable && (field.matches("select")
         ? [...field.options].some(option => option.selected !== option.defaultSelected)
@@ -614,7 +616,6 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
   let served = mount.querySelector(":scope > .shell-screen[data-served]");
   let servedStrip = mount.previousElementSibling?.localName === "nav" ? mount.previousElementSibling : null;
   const servedCas = document.querySelector('meta[name="pronto-cas"]')?.getAttribute("content");
-  const servedWords = document.querySelector('meta[name="pronto-words"]')?.getAttribute("content") ?? "";
   const banner = (err) => {
     mount.replaceChildren();
     const pre = document.createElement("pre");
@@ -622,7 +623,7 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
     pre.textContent = String(err?.stack ?? err);
     mount.append(pre);
   };
-  // The banner is a boot-failure surface, a deploy's (`unheard` below), and a
+  // The banner is a boot-failure surface, a deploy's it cannot take, and a
   // program error's whenever it lands: the app's own bug, which no retry and
   // no reader recovers, so it dies attributed rather than logged. Once a
   // screen is mounted, any other stray rejection (a severed gateway killing
@@ -648,68 +649,18 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
   });
 
   try {
-    // The newest screen files the service worker has announced, by path. It
-    // announces one another window fetched from a newer deploy, which can be
-    // before anything here is mounted; a message no listener hears is
-    // dropped, so this listens before anything is fetched, and a screen
-    // catches up once it is on show.
-    const announced = new Map();
-    let hear = null;
     let words = null;
-    globalThis.navigator?.serviceWorker?.addEventListener("message", (e) => {
-      // Another tab may revalidate canonical files from a newer deploy. This
-      // document's import map keeps its templates, roles and catalogues together.
-      if (document.getElementById("pronto-assets")) return;
-      const type = e.data?.type;
-      // One announced before the catalogue is first asked for has nothing to
-      // replace: the request is answered with this one.
-      if (type === "PRONTO_MESSAGES_UPDATED") {
-        if (liveUpdates) { hear?.(); return; }
-        words?.heard(e.data.pathname, e.data.json).then((took) => took && hear?.(), banner);
-        return;
-      }
-      if (type === "PRONTO_ASSET_UPDATED") {
-        if (liveUpdates) hear?.();
-        return;
-      }
-      if (type !== "PRONTO_SKELETON_UPDATED" && type !== "PRONTO_STYLE_UPDATED") return;
-      if (!liveUpdates) announced.set(e.data.pathname, e.data.html ?? e.data.css);
-      hear?.();
-    });
 
     // Against the document's base, not the address it arrived under: one entry
     // answers at every route, so location.href is /games as readily as
     // /shell/, and resolving there asks for a shell.yaml beside the route.
     const configUrl = new URL(config, document.baseURI);
     const appBase = new URL("..", configUrl);
-    const releaseId = liveUpdates ? await startupReleaseId() : null;
-    let selectedRelease = liveUpdates ? await fetchRelease(appBase, null, { preferCached: true, releaseId }) : null;
-    if (liveUpdates && !selectedRelease) throw new Error("live updates require shell/release.json");
-    if (liveUpdates && !releaseId) {
-      const commit = await prepareRestartRelease(appBase, selectedRelease);
-      await idle();
-      sessionStorage.setItem(recoveryKey, JSON.stringify({
-        expected: selectedRelease.manifest.id,
-        owner: initialDraftOwner,
-        initial: [...captureFields(served ?? mount)],
-      }));
-      commit();
-      return { restarting: true };
-    }
-    if (liveUpdates && new URL(location.href).searchParams.has("pronto-release")) {
-      const address = new URL(location.href);
-      address.searchParams.delete("pronto-release");
-      history.replaceState(history.state, "", address.href);
-    }
-    let initialFields = liveUpdates ? captureFields(served ?? mount) : null;
-    if (selectedRelease) {
-      activateRelease(selectedRelease);
-      served?.remove();
-      served = null;
-      servedStrip?.remove();
-      servedStrip = null;
-    }
-    const text = await (liveUpdates ? readAsset(configUrl) : fetchText(configUrl));
+    // The release this page runs, named by its entry; null where it was served
+    // without one, which then takes no other.
+    let running = releaseOf(document);
+    let initialFields = captureFields(served ?? mount);
+    const text = await fetchText(configUrl);
     const cfg = configUrl.pathname.endsWith(".json")
       ? JSON.parse(text)
       : (await import("./vendor/js-yaml.js")).load(text);
@@ -730,10 +681,10 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
     // and the screen's own files. Asked one after another, each is a round
     // trip the first paint pays in turn.
     const arriving = addresses(location);
-    words = catalogues(appBase, cfg.i18n, liveUpdates);
+    words = catalogues(appBase, cfg.i18n);
     const { messages, ensure: ensureMessages, answered, all: allMessages } = words;
     const storybook = search.has("storybook");
-    if (arriving !== null && !storybook && !liveUpdates) {
+    if (arriving !== null && !storybook) {
       if (preload) preloadScreen(document, appBase, arriving.route, { template: false });
       prefetchScreen(appBase, arriving.route);
     }
@@ -826,7 +777,7 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
           session = s;
           if (!hadInitialOwner) initialDraftOwner = sessionOwner(s);
           sessionStorage.setItem("pronto-token", JSON.stringify(s));
-          if (liveUpdates && recovery && recovery.owner === null && !hadInitialOwner) {
+          if (recovery && recovery.owner === null && !hadInitialOwner) {
             recovery.owner = sessionOwner(s);
             retainRecovery();
           }
@@ -836,22 +787,21 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
     }
 
     await catalogued;
-    if (served !== null) await words.settle(servedWords);
-    const { createStore } = await dataPlane;
+    const { createStore, servedReadsOf } = await dataPlane;
     const store = createStore("", {
       ...cfg,
       appBase,
-      release: liveUpdates,
       mintedGuest,
       ensureSession: guestSession ? () => guestSession : null,
     });
-    recovery = liveUpdates ? JSON.parse(sessionStorage.getItem(recoveryKey) ?? "null") : null;
-    const owner = liveUpdates ? (session === null ? storedSessionOwner() : sessionOwner(session)) : null;
+    const linkPrefetch = startLinkPrefetch({ addresses, appBase, store, servedReadsOf });
+    recovery = JSON.parse(sessionStorage.getItem(recoveryKey) ?? "null");
+    const owner = session === null ? storedSessionOwner() : sessionOwner(session);
     if (initialDraftOwner !== owner) initialFields = null;
     const ownsRecovery = owner !== undefined && (recovery?.owner === owner ||
       (recovery?.owner === null && (initialDraftOwner === owner || (mintedGuest && !hadInitialOwner)) &&
         recovery.initial && !recovery.screens && !recovery.tabs));
-    if (recovery && ownsRecovery && recovery.expected === selectedRelease?.manifest.id) {
+    if (recovery && ownsRecovery && running !== null && recovery.expected === releaseKey(running)) {
       recovery.owner = owner;
       if (recovery.tabs) await store.restoreTabs(recovery.tabs);
       delete recovery.tabs;
@@ -972,7 +922,7 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
           }
           if (current !== null) {
             const explicitLocale = Boolean(cfg.i18n && current.locale === cfg.i18n.default && typeof location !== "undefined" && new URLSearchParams(location.search).has("lang"));
-            localizeStrip(nav, cfg, { locale: current.locale, here: location.pathname, messages, explicitLocale });
+            localizeStrip(nav, cfg, { locale: current.locale, here: location.pathname, search: location.search ?? "", messages, explicitLocale });
           }
           return s;
         });
@@ -1011,13 +961,13 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
         if (canonical !== undefined) restate(canonical);
         ({ route, params, locale, written } = currentRoute());
       }
-      if (preload && !liveUpdates) preloadScreen(document, appBase, route);
+      if (preload) preloadScreen(document, appBase, route);
       if (!answered(locale)) {
         await ensureMessages(locale);
         if (turn !== showing) return;
       }
       const explicitLocale = Boolean(cfg.i18n && locale === cfg.i18n.default && typeof location !== "undefined" && new URLSearchParams(location.search).has("lang"));
-      localizeStrip(nav, cfg, { locale, here: location.pathname, messages, explicitLocale });
+      localizeStrip(nav, cfg, { locale, here: location.pathname, search: location.search ?? "", messages, explicitLocale });
       const key = keyOf(route, params);
       if (current) {
         current.scrollY = window.scrollY;
@@ -1040,14 +990,13 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
         // back resumes. Only "push" is treated as an arrival.
         window.scrollTo(0, navigationType === "push" ? 0 : entry.scrollY);
         await entry.handle?.resume();
-        if (!liveUpdates) {
-          await catchUp(entry).catch(unheard(entry));
-          if (preload) {
-            preloadLinkedScreens(document, appBase, cfg, route.screen, [
-              ...(entry.handle?.links ?? []),
-              ...(hasStrip(cfg, session || mintedGuest) ? stripRoutes(cfg).map((r) => r.screen) : []),
-            ]);
-          }
+        reword(entry);
+        linkPrefetch.idle();
+        if (preload) {
+          preloadLinkedScreens(document, appBase, cfg, route.screen, [
+            ...(entry.handle?.links ?? []),
+            ...(hasStrip(cfg, session || mintedGuest) ? stripRoutes(cfg).map((r) => r.screen) : []),
+          ]);
         }
         return;
       }
@@ -1092,7 +1041,6 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
           ensureMessages,
           locale,
           navigate,
-          release: liveUpdates,
           ...(adopting ? { served: { screen: adopting.firstElementChild, cas: servedCas } } : {}),
         }));
         fresh.handle = await fresh.loading;
@@ -1135,70 +1083,40 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
         clearTimeout(capped);
         if (!adopting) release(el);
       }
-      if (!liveUpdates) {
-        await catchUp(fresh).catch(unheard(fresh));
-        if (preload) {
-          preloadLinkedScreens(document, appBase, cfg, route.screen, [
-            ...(fresh.handle?.links ?? []),
-            ...(hasStrip(cfg, session || mintedGuest) ? stripRoutes(cfg).map((r) => r.screen) : []),
-          ]);
-        }
+      linkPrefetch.idle();
+      if (preload) {
+        preloadLinkedScreens(document, appBase, cfg, route.screen, [
+          ...(fresh.handle?.links ?? []),
+          ...(hasStrip(cfg, session || mintedGuest) ? stripRoutes(cfg).map((r) => r.screen) : []),
+        ]);
       }
     };
-    // A newer template is a deploy's, and names its modules in that deploy's
-    // config. This shell runs the config it booted with, so before a template
-    // is taken the config is asked of the network: one the deploy changed is a
-    // newer app than the one running, and the document is replaced by it, as
-    // sign-out replaces it.
-    const settleConfig = async () => {
-      if (await fetchText(configUrl, { cache: "no-cache" }) === text) return;
-      location.reload();
-      return new Promise(() => {});
+    // A screen written in catalogues older than the ones the page holds now:
+    // a deployment's, taken while it was out of sight.
+    const reword = (entry) => {
+      if (entry.handle === undefined || entry.words === words.taken()) return;
+      entry.words = words.taken();
+      entry.handle.localize();
+      localizeStrip(nav, cfg, { locale: entry.locale, here: location.pathname, search: location.search ?? "", messages });
     };
-    // A screen on show takes the files announced for it: the catalogues it
-    // was not written in, its stylesheet in place, and its skeleton morphed to
-    // a template it was not drawn from.
-    const catchUp = async (entry) => {
-      if (entry.handle === undefined || current !== entry) return;
-      if (entry.words !== words.taken()) {
-        entry.words = words.taken();
-        entry.handle.localize();
-        localizeStrip(nav, cfg, { locale: entry.locale, here: location.pathname, messages });
-      }
-      const css = announced.get(new URL(entry.route.files.css, appBase).pathname);
-      const style = document.getElementById(`screen-css-${entry.route.screen}`);
-      if (css !== undefined && style !== null && style.textContent !== css) style.textContent = css;
-      const html = announced.get(new URL(entry.route.files.html, appBase).pathname);
-      if (html === undefined || templateHash(html) === entry.cas) return;
-      await settleConfig();
-      const was = entry.cas;
-      entry.cas = templateHash(html);
-      await entry.handle.morph(html).catch((err) => {
-        // Not taken, so asked again the next time the screen is shown.
-        if (entry.cas === templateHash(html)) entry.cas = was;
-        throw err;
-      });
-    };
-    // A newer file the screen cannot take. One the network failed to answer
+    // A deployment the page could not take. One the network failed to answer
     // is an outage, said as a dropped connection is: the screen stays as it
-    // was, and usable. Anything else is a deploy that broke it, which the
-    // reader is told as a boot that failed is.
-    const unheard = (entry) => (err) => {
+    // was, and usable. Anything else broke it, which the reader is told as a
+    // boot that failed is.
+    const unheard = (err) => {
       if (!(err instanceof Unanswered)) return banner(err);
       console.error(err);
-      entry.el.querySelector(".screen")?.setAttribute("data-state", "network-error");
+      current?.el.querySelector(".screen")?.setAttribute("data-state", "network-error");
     };
-    const updateScreens = async (paths, next) => {
+    // A newer template or style for a screen the page holds, morphed in place
+    // with what the reader typed carried through it.
+    const updateScreens = async (paths) => {
       for (const entry of [...held.values()]) {
-        const path = entry.route.files.html;
-        if (!paths.includes(path)) continue;
+        if (!paths.includes(new URL(entry.route.files.html, appBase).pathname)) continue;
         if (entry.loading && !entry.handle) await entry.loading;
         if (entry.gone || held.get(entry.key) !== entry) continue;
-        const current = selectedRelease.manifest.screens[path];
-        const changed = next.manifest.screens[path];
-        if (current.html !== changed.html) {
-          const html = next.assets.get(new URL(path, appBase).href);
-          if (html === undefined) throw new Error(`verified release lacks ${path}`);
+        const [html, css] = await Promise.all([entry.route.files.html, entry.route.files.css].map((f) => fetchText(new URL(f, appBase))));
+        if (templateHash(html) !== entry.cas) {
           const saved = captureFields(entry.el);
           morphDrafts.set(entry.el, saved);
           try {
@@ -1209,12 +1127,7 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
           }
           entry.cas = templateHash(html);
         }
-        if (current.css !== changed.css) {
-          const cssPath = entry.route.files.css;
-          const css = next.assets.get(new URL(cssPath, appBase).href);
-          if (css === undefined) throw new Error(`verified release lacks ${cssPath}`);
-          await entry.handle.updateStyle(css);
-        }
+        await entry.handle.updateStyle(css);
       }
     };
     // The one way anything inside the app moves, to an address routeHref
@@ -1254,8 +1167,6 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
         // screen already on show, which leaves sign-out doing nothing visible.
         if (e.navigationType === "reload") return;
         const url = new URL(e.destination.url, location.href);
-        if (url.searchParams.has("pronto-release") &&
-            url.searchParams.get("pronto-release") !== new URL(location.href).searchParams.get("pronto-release")) return;
         // Only a path names a screen. An in-page fragment (an href="#id", the
         // chrome's own sign-out anchor) changes nothing the stack owns, and a
         // path this app has no route for belongs to the server.
@@ -1280,92 +1191,102 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
       addEventListener("popstate", () => show("traverse"));
     }
 
+    // A deployment is a newer entry at this address. What changed between the
+    // two maps decides how the page takes it (release-plan.js): screens and
+    // catalogues in place, anything the page runs by restarting into it, once
+    // the reader is not mid-edit, with drafts and tab rows carried through.
     let checking = null;
-    let restartTarget = null;
-    let deferredRelease = false;
+    // A deployment found while the reader was editing: one to restart into,
+    // or one whose screens wait to be morphed.
+    let pending = null;
+    let deferred = false;
     let restarting = null;
     const restart = () => {
       if (restarting) return restarting;
-      if (!restartTarget || editing()) return Promise.resolve();
+      if (pending === null || editing()) return Promise.resolve();
       restarting = (async () => {
-        const target = restartTarget;
-        const commit = await prepareRestartRelease(appBase, target);
-        if (restartTarget !== target || editing()) return;
         const at = gesture;
         const screens = { ...recovery?.screens };
         for (const entry of held.values()) {
           screens[entry.key] = [...new Map([...(screens[entry.key] ?? []), ...captureFields(entry.el)])];
         }
         const tabs = await store.tabSnapshot();
-        if (restartTarget !== target || gesture !== at || editing()) return;
+        if (gesture !== at || editing()) return;
         sessionStorage.setItem(recoveryKey, JSON.stringify({
-          expected: target.manifest.id,
-          owner: liveUpdates ? (session === null ? storedSessionOwner() : sessionOwner(session)) : null,
+          expected: releaseKey(pending),
+          owner: session === null ? storedSessionOwner() : sessionOwner(session),
           screens,
           tabs,
           ...(initialFields === null ? {} : { initial: [...new Map([...(recovery?.initial ?? []), ...initialFields])] }),
         }));
-        commit();
+        // A navigation would be answered from the entry the worker kept.
+        await globalThis.caches?.delete(ENTRY_CACHE);
+        location.reload();
       })().finally(() => { restarting = null; });
       return restarting;
     };
     const checkRelease = () => {
-      if (checking) return checking;
+      if (checking || running === null) return checking;
       checking = (async () => {
-        const next = await fetchRelease(appBase, restartTarget ?? selectedRelease);
-        if (!next) throw new Error("live updates require shell/release.json");
-        if (restartTarget) {
-          if (next?.manifest.id !== restartTarget.manifest.id) restartTarget = next;
-          return restart();
+        let res;
+        try {
+          res = await fetch(location.href, { cache: "no-store", headers: { accept: "text/html" } });
+        } catch (error) {
+          // Offline, or the door is down: no deployment is learned of.
+          if (error instanceof TypeError) return;
+          throw error;
         }
-        if (!next || next.manifest.id === selectedRelease?.manifest.id) return;
-        const plan = planRelease(selectedRelease.manifest, next.manifest);
+        if (!res.ok) return;
+        // A portal or a door answering for ours redirects, serves another
+        // kind of document, or a page without a release map: nothing is
+        // learned of, and the screen stays. A broken entry is a boot's to
+        // refuse, not a running page's to tear down.
+        const kind = res.headers.get("content-type");
+        if (res.redirected || (kind !== null && !kind.includes("text/html"))) return;
+        const found = SERVED_MAP.exec(await res.text());
+        if (found === null) return;
+        const next = JSON.parse(found[1]).imports;
+        const plan = planRelease(running, next, cfg.routes.map((r) => ({
+          html: new URL(r.files.html, appBase).pathname,
+          css: new URL(r.files.css, appBase).pathname,
+        })));
+        if (plan.kind === "unchanged") return;
         if (plan.kind === "restart") {
-          restartTarget = next;
+          pending = next;
           await restart();
           return;
         }
-        if (plan.kind === "morph") {
-          if (editing()) {
-            deferredRelease = true;
-            return;
-          }
-          activateRelease(next);
-          try {
-            await updateScreens(plan.screens, next);
-          } catch (error) {
-            restartTarget = next;
-            await restart();
-            throw error;
-          }
-          selectedRelease = next;
-          deferredRelease = false;
+        if (editing()) {
+          deferred = true;
+          return;
         }
+        deferred = false;
+        setRelease(document, next);
+        running = next;
+        await updateScreens(plan.screens);
+        for (const name of plan.catalogues) await words.heard(name, await fetchText(new URL(name, location.origin)));
+        if (current) reword(current);
       })().finally(() => { checking = null; });
       return checking;
     };
-    if (liveUpdates) {
-      const retryDeferred = () => {
-        if (restartTarget) void restart();
-        else if (deferredRelease) void checkRelease();
-      };
-      document.addEventListener("focusout", () => setTimeout(retryDeferred, 0));
-      document.addEventListener("change", () => setTimeout(retryDeferred, 0));
-    }
-
-    hear = liveUpdates ? () => void checkRelease() : () => current !== null && catchUp(current).catch(unheard(current));
+    const heed = () => checkRelease()?.catch(unheard);
+    // A control losing focus only retries what was found while editing.
+    const retry = () => setTimeout(() => {
+      if (pending !== null) restart().catch(unheard);
+      else if (deferred) heed();
+    }, 0);
+    document.addEventListener("focusout", retry);
+    document.addEventListener("change", retry);
 
     await show();
     if (guestSession) await guestSession;
     booted = true;
-    if (liveUpdates) {
-      void checkRelease();
-      setInterval(() => checkRelease(), 30000);
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) checkRelease();
-      });
-      navigator.serviceWorker?.addEventListener("controllerchange", () => checkRelease());
-    }
+    // Painted from the worker's copy, which is any deployment old.
+    if (document.querySelector('meta[name="pronto-kept"]')) heed();
+    setInterval(heed, RELEASE_CHECK_MS);
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) heed();
+    });
     return { store, navigate };
   } catch (err) {
     banner(err);

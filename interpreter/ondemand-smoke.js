@@ -557,8 +557,10 @@ for (const [kind, opts, indexedTable, column] of [
       assert(collections[indexedTable].indexes.size === 1, `${column} index is recreated before the next query compiles`);
       const again = await store.query("player_game", null, opts);
       assert(JSON.stringify(again) === JSON.stringify(first), "the revisited query returns the same bounded rows");
+      // The revisit answers what the view last held while its subset loads.
+      await until(() => fake.subsets.slice(before).some(s => s.table === "player_game" && s.where === '"game_id" = $1'), "the revisit requests the game's subset");
+      if (kind === "joined") await until(() => collections.player.size > 0, "the revisit loads the game's players");
       const subsets = fake.subsets.slice(before);
-      assert(subsets.some(s => s.table === "player_game" && s.where === '"game_id" = $1'), "the revisit requests the game's subset");
       assert(subsets.every(s => s.table === "player_game" ? s.where === '"game_id" = $1' : s.where === '"id" = ANY($1)'), "every reopened source requests only matching rows");
       assert(collections.player_game.size === 2, "the unrelated game's row stays unloaded");
       if (kind === "joined") assert(collections.player.size === 2, "unrelated players stay unloaded");
@@ -855,6 +857,28 @@ lazy("a subset that failed in transit is asked again while the read waits, and o
   assert(ids(await store.query("player_game", null, g2)) === `["pg3"]`, "a refusal fails no other view");
   stopG1();
   stopG2();
+});
+
+lazy("a subset that fails while the page is hidden is asked again once it shows", async ({ fake, store }) => {
+  // Regression: a failure while the page was being left skipped its retry,
+  // and a page the back-forward cache gave back held a view that never
+  // rebuilt, its reads waiting for good.
+  const ids = (rows) => JSON.stringify(rows.map((r) => r.id).sort());
+  const opts = { filter: "game_id=eq.g1" };
+  const stop = store.subscribe("player_game", () => {}, opts);
+  globalThis.dispatchEvent(new Event("pagehide"));
+  try {
+    fake.fail("player_game", [401, { error: "invalid shape token" }]);
+    const read = store.query("player_game", null, opts).then(ids);
+    await until(() => fake.subsets.some((s) => s.table === "player_game" && s.params["1"] === "g1"), "the subset asked while hidden");
+    await new Promise((r) => setTimeout(r, 50));
+    globalThis.dispatchEvent(new Event("pageshow"));
+    const late = new Promise((r) => setTimeout(() => r("never"), 4000));
+    assert((await Promise.race([read, late])) === `["pg1","pg2"]`, "the read of a view that failed while hidden never settled");
+  } finally {
+    globalThis.dispatchEvent(new Event("pageshow"));
+    stop();
+  }
 });
 
 // Regression: every failure that was no refusal rebuilt the view without end,
@@ -1159,7 +1183,10 @@ Deno.test({
         rows = [];
         await tick(30);
         assert(wakes === 0 && requests.length === 1, `remote changes do not trigger a request-only read: ${wakes} wakes, ${requests.map(String).join(", ")}`);
-        assert((await store.query("player_game", null, opts)).length === 0, "an explicit read gets current rows");
+        assert((await store.query("player_game", null, opts)).length === 1, "a read again answers what the tab read");
+        await until(() => wakes === 1, "the rows the refresh behind it brought wake the reader");
+        assert(requests.length === 2, `one refresh: ${requests.map(String).join(", ")}`);
+        assert((await store.query("player_game", null, opts)).length === 0, "the woken read is what moved");
         assert(globalThis.__prontoViews.size === 0, "request-only reads create no local views");
         assert(globalThis.__mechaClient.collections.player_game.size === 0, "request-only reads retain no rows");
       } finally { stop(); }
