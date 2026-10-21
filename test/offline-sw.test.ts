@@ -1,4 +1,4 @@
-// The service worker revalidates a screen's skeleton and tells every open
+// The service worker fetches a screen's skeleton and tells every other open
 // window when it changed, and the shell morphs the live screen to it. A first
 // fetch once counted as a change: with several windows opening screens at once
 // (check-visual's lanes, a reader with tabs), each window was told to morph to
@@ -28,7 +28,7 @@ function worker(initial: string | null, cacheControl = "public, no-cache") {
   const self = {
     location: { origin: "https://app.test" },
     addEventListener: (type: string, fn: (e: unknown) => void) => (handlers[type] = fn),
-    clients: { matchAll: () => Promise.resolve([{ postMessage: (m: unknown) => posted.push(m) }]), claim: () => {} },
+    clients: { matchAll: () => Promise.resolve([{ id: "other", postMessage: (m: unknown) => posted.push(m) }]), claim: () => {} },
     skipWaiting: () => {},
   }
   const caches = {
@@ -53,17 +53,17 @@ function worker(initial: string | null, cacheControl = "public, no-cache") {
           : resolve(new Response(served, { status, headers: { "Cache-Control": control } })), 1)
     )
   new Function("self", "caches", "fetch", source)(self, caches, fetch)
-  const raw = async (path: string, mode = "cors", cache = "default") => {
+  const raw = async (path: string, mode = "cors", cache = "default", clientId = "") => {
     let answer: Promise<Response> | undefined
     // A Request cannot be constructed in navigate mode; the worker reads only
     // these four.
     const req = { method: "GET", url: `https://app.test${path}`, mode, cache }
-    handlers.fetch({ request: req, respondWith: (p: Promise<Response>) => (answer = p),
+    handlers.fetch({ request: req, clientId, respondWith: (p: Promise<Response>) => (answer = p),
       waitUntil: (p: Promise<unknown>) => lifetime.push(p) })
     return await answer!
   }
-  const get = async (path: string, mode = "cors", cache = "default") => {
-    const text = await (await raw(path, mode, cache)).text()
+  const get = async (path: string, mode = "cors", cache = "default", clientId = "") => {
+    const text = await (await raw(path, mode, cache, clientId)).text()
     // The revalidation outlives the answer when a cached copy was served.
     await Promise.all(lifetime.splice(0))
     return text
@@ -79,14 +79,26 @@ function worker(initial: string | null, cacheControl = "public, no-cache") {
 }
 
 describe("the offline service worker", () => {
-  it("answers from its copy while refreshing it for the next request", async () => {
-    const sw = worker("old")
-    await sw.get("/messages/pt-BR.json")
-    sw.serve("new")
-    expect(await sw.get("/messages/pt-BR.json")).toBe("old")
-    expect(await sw.get("/messages/pt-BR.json")).toBe("new")
+  // It answered an app's files from its copy and refreshed them behind, so
+  // the first load after a deploy ran a mixture: a kept config named no route
+  // for the deploy's new /pt-br and the boot failed, then a fresh config drew
+  // a kept hatch, in the words before. Each took a reload to clear.
+  it("answers an app's files from the network, and from its copy only offline", async () => {
+    const sw = worker("{\"routes\": [\"/\"]}")
+    await sw.get("/shell/shell.json")
+    sw.serve("{\"routes\": [\"/\", \"/pt-br\"]}")
+    expect(await sw.get("/shell/shell.json")).toBe("{\"routes\": [\"/\", \"/pt-br\"]}")
     sw.serve(null)
-    expect(await sw.get("/messages/pt-BR.json")).toBe("new")
+    expect(await sw.get("/shell/shell.json")).toBe("{\"routes\": [\"/\", \"/pt-br\"]}")
+  })
+
+  it("answers an app's file the server fails from its copy", async () => {
+    // A door answering 502 mid-deploy would fail the boot while the copy stood ready.
+    const sw = worker("old code")
+    await sw.get("/shell/hatches/battle/battle.js")
+    sw.serve("bad gateway", 502)
+    expect(await sw.get("/shell/hatches/battle/battle.js")).toBe("old code")
+    expect(await (await sw.raw("/shell/hatches/battle/nunca.js")).status).toBe(502)
   })
 
   it("returns a successful uncached navigation when Cache Storage cannot retain it", async () => {
@@ -115,7 +127,7 @@ describe("the offline service worker", () => {
   it("announces a skeleton that changed since it was cached", async () => {
     const sw = worker("<section class=\"screen\">new</section>")
     sw.store.set("https://app.test/shell/screens/select.html", new Response("<section class=\"screen\">old</section>"))
-    expect(await sw.get("/shell/screens/select.html")).toBe("<section class=\"screen\">old</section>")
+    expect(await sw.get("/shell/screens/select.html")).toBe("<section class=\"screen\">new</section>")
     expect(sw.posted).toEqual([{
       type: "PRONTO_SKELETON_UPDATED",
       url: "https://app.test/shell/screens/select.html",
@@ -127,12 +139,22 @@ describe("the offline service worker", () => {
   it("announces a changed code asset to the running shell", async () => {
     const sw = worker("new code")
     sw.store.set("https://app.test/omnishell/interpreter/shell.js", new Response("old code"))
-    expect(await sw.get("/omnishell/interpreter/shell.js")).toBe("old code")
+    expect(await sw.get("/omnishell/interpreter/shell.js")).toBe("new code")
     expect(sw.posted).toEqual([{
       type: "PRONTO_ASSET_UPDATED",
       url: "https://app.test/omnishell/interpreter/shell.js",
       pathname: "/omnishell/interpreter/shell.js",
     }])
+  })
+
+  it("does not announce a change to the window it answered with it", async () => {
+    // That window holds the newer file already: told, it would morph a screen
+    // to the markup it had just mounted.
+    const sw = worker("<section class=\"screen\">new</section>")
+    sw.store.set("https://app.test/shell/screens/select.html", new Response("<section class=\"screen\">old</section>"))
+    await sw.get("/shell/screens/select.html", "cors", "default", "other")
+    expect(sw.posted).toEqual([])
+    expect(await sw.store.get("https://app.test/shell/screens/select.html")!.text()).toBe("<section class=\"screen\">new</section>")
   })
 
   // A navigation went to the network first for a round, so a returning reader

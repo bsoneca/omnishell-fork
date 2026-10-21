@@ -222,50 +222,46 @@ self.addEventListener("fetch", (event) => {
   event.respondWith((async () => {
     const pinned = await pinnedResponse(event, url);
     if (pinned) return pinned;
+    // An app's files are asked of the network, which answers 304 for those
+    // that have not changed, and the copy answers only offline or when the
+    // server fails (a 5xx). A copy answering first ran a deploy's files beside
+    // the last one's: a config without the route asked for, a hatch from the
+    // deploy before. The document still paints from its copy (below).
     if (["/shell/", "/omnishell/", "/messages/"].some((p) => url.pathname.startsWith(p))) {
       const cache = await caches.open(STATIC_CACHE);
       const cached = await cache.match(req);
       const kept = cached?.clone();
-      const update = (async () => {
-        let fresh;
-        try {
-          fresh = await fetch(req);
-        } catch (error) {
-          if (cached) return cached;
-          throw error;
-        }
-        if (!fresh.ok) return fresh;
-        if (!cached) {
-          event.waitUntil(cache.put(req, fresh.clone()));
-          return fresh;
-        }
-        const newText = await fresh.clone().text();
-        if (newText === await kept.text()) return fresh;
-        event.waitUntil(cache.put(req, fresh.clone()).then(async () => {
-          const clients = await self.clients.matchAll({ type: "window" });
-          for (const client of clients) {
-            if (url.pathname.endsWith(".html")) {
-              client.postMessage({ type: "PRONTO_SKELETON_UPDATED", url: req.url, pathname: url.pathname, html: newText });
-            } else if (url.pathname.endsWith(".css")) {
-              client.postMessage({ type: "PRONTO_STYLE_UPDATED", url: req.url, pathname: url.pathname, css: newText });
-            } else if (url.pathname.startsWith("/messages/")) {
-              client.postMessage({ type: "PRONTO_MESSAGES_UPDATED", url: req.url, pathname: url.pathname, json: newText });
-            } else {
-              client.postMessage({ type: "PRONTO_ASSET_UPDATED", url: req.url, pathname: url.pathname });
-            }
+      let fresh;
+      try {
+        fresh = await fetch(req);
+      } catch (error) {
+        if (cached) return cached;
+        throw error;
+      }
+      if (fresh.status >= 500) return cached ?? fresh;
+      if (!fresh.ok) return fresh;
+      const copy = fresh.clone();
+      event.waitUntil((async () => {
+        if (!cached) return cache.put(req, copy);
+        const newText = await copy.clone().text();
+        if (newText === await kept.text()) return;
+        await cache.put(req, copy);
+        // Other windows run the files they were answered: this one's arrived current.
+        const clients = await self.clients.matchAll({ type: "window" });
+        for (const client of clients) {
+          if (event.clientId && client.id === event.clientId) continue;
+          if (url.pathname.endsWith(".html")) {
+            client.postMessage({ type: "PRONTO_SKELETON_UPDATED", url: req.url, pathname: url.pathname, html: newText });
+          } else if (url.pathname.endsWith(".css")) {
+            client.postMessage({ type: "PRONTO_STYLE_UPDATED", url: req.url, pathname: url.pathname, css: newText });
+          } else if (url.pathname.startsWith("/messages/")) {
+            client.postMessage({ type: "PRONTO_MESSAGES_UPDATED", url: req.url, pathname: url.pathname, json: newText });
+          } else {
+            client.postMessage({ type: "PRONTO_ASSET_UPDATED", url: req.url, pathname: url.pathname });
           }
-        }));
-        return fresh;
-      })();
-      if (req.cache === "no-cache") {
-        const fresh = await update;
-        return fresh.status >= 500 ? cached ?? fresh : fresh;
-      }
-      if (cached) {
-        event.waitUntil(update);
-        return cached;
-      }
-      return update;
+        }
+      })());
+      return fresh;
     }
 
     if (req.mode === "navigate") {

@@ -417,7 +417,7 @@ function renderSession(session, cfg, store, signOut, chrome, served = null) {
  * shows the copy it was written with. A request that never answered is no
  * answer: it rejects whoever waits on it, and the next to ask asks again.
  *
- * The worker answers from its copy of a catalogue, which is any deploy old.
+ * Offline the worker answers from its copy of a catalogue, which is any deploy old.
  * `settle` takes a served document's witness of the catalogues it is drawn in
  * (document.js) and asks the network past the worker for each this shell holds
  * otherwise, as a screen does for its template: the screen writes its words
@@ -649,10 +649,10 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
 
   try {
     // The newest screen files the service worker has announced, by path. It
-    // answers a screen's fetch from its copy and announces a newer one once
-    // its revalidation lands, which can be before anything here is mounted; a
-    // message no listener hears is dropped, so this listens before anything
-    // is fetched, and a screen catches up once it is on show.
+    // announces one another window fetched from a newer deploy, which can be
+    // before anything here is mounted; a message no listener hears is
+    // dropped, so this listens before anything is fetched, and a screen
+    // catches up once it is on show.
     const announced = new Map();
     let hear = null;
     let words = null;
@@ -662,7 +662,7 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
       if (document.getElementById("pronto-assets")) return;
       const type = e.data?.type;
       // One announced before the catalogue is first asked for has nothing to
-      // replace: the request is answered from the worker's copy, this one.
+      // replace: the request is answered with this one.
       if (type === "PRONTO_MESSAGES_UPDATED") {
         if (liveUpdates) { hear?.(); return; }
         words?.heard(e.data.pathname, e.data.json).then((took) => took && hear?.(), banner);
@@ -1146,10 +1146,10 @@ export async function createShell({ config, mount, liveUpdates = false, preload 
       }
     };
     // A newer template is a deploy's, and names its modules in that deploy's
-    // config. The worker answers the config from its copy and announces none
-    // of its changes, so before a template is taken the config is asked of the
-    // network: one the deploy changed is a newer app than the one running, and
-    // the document is replaced by it, as sign-out replaces it.
+    // config. This shell runs the config it booted with, so before a template
+    // is taken the config is asked of the network: one the deploy changed is a
+    // newer app than the one running, and the document is replaced by it, as
+    // sign-out replaces it.
     const settleConfig = async () => {
       if (await fetchText(configUrl, { cache: "no-cache" }) === text) return;
       location.reload();

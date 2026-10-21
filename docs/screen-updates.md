@@ -44,8 +44,9 @@ interrupted deployment cannot promote a mixture; a returning tab boots from the
 last verified set. The terminal checks for a newer release after the screen
 mounts, every 30 seconds, and on tab return or service-worker activation. A
 control losing focus only retries an update already found while editing. The
-service worker serves cached pages and assets immediately while revalidating
-them in the background. A restarted document and its asset requests are pinned
+service worker paints cached pages immediately while revalidating them in the
+background, and answers an app's files from the network, from its copy only
+offline or when the server fails (a 5xx). A restarted document and its asset requests are pinned
 to one verified release by the service worker; another tab staging a release
 cannot change that document's runtime. Verified assets from older releases
 remain for an hour before cleanup, and releases pinned by open clients remain
@@ -222,8 +223,8 @@ live screen own markup it did not render
   only in memory — a placeholder attribute's template, a list's item templates
   — is set on the served node it became, the route's declared host-DOM hatches mount in place,
   and the words are rewritten only where the catalogue says otherwise. The
-  document and the worker's copies of its template and stylesheet are each any
-  deploy old, and a hash says only that two differ, not which is newer: where
+  document is any deploy old, and so offline are the worker's copies of its
+  template and stylesheet, and a hash says only that two differ, not which is newer: where
   `pronto-cas` is not the fetched template's hash, or the stylesheet the
   document carries inline is not the fetched one, both files are asked again
   with `cache: "no-cache"`, which the worker answers from the network, and from
