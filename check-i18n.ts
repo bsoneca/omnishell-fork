@@ -1409,6 +1409,9 @@ function chromeFailures(): string[] {
   grades("a provider offered in no Spanish", `chrome key "chrome_signin_google" is missing`, {
     shell: { auth: { required: false, providers: ["google"] } },
   });
+  grades("the phone offered in no Spanish", `chrome key "chrome_signin_phone" is missing`, {
+    shell: { auth: { required: false, providers: ["google", "phone"] } },
+  });
 
   // The whole of the built-in copy's point: an app that shows neither surface
   // is asked for none of it.
