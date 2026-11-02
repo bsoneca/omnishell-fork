@@ -339,6 +339,37 @@ describe("the server terminal", () => {
     expect(h.live().length).toBe(2)
   })
 
+  it("lets every held document go after a rest, and lets the store catch up first", async () => {
+    const fake = fakeStore()
+    let clock = 0
+    let wakes = 0
+    let renders = 0
+    const renderer = createRenderer({
+      store: fake.store,
+      origin: ORIGIN,
+      capacity: 2,
+      queue: 8,
+      route,
+      now: () => clock,
+      rest: { ms: 1000, wake: async () => { wakes++ } },
+      async render(_found, store, base) {
+        renders++
+        const stop = store.subscribe("game_card", () => {}, {})
+        stop()
+        return { html: `<p>${base.href} #${renders}</p>`, gone: false }
+      },
+    })
+    const get = () => renderer.handle(new Request("http://render:8090/jogo/1"))
+    await get()
+    clock = 500
+    await get()
+    expect(renders).toBe(1)
+    expect(wakes).toBe(0)
+    clock = 2000
+    expect(await (await get()).text()).toContain("#2")
+    expect(wakes).toBe(1)
+  })
+
   it("says it may be kept by anyone and served by no one unasked, and answers a revalidation", async () => {
     const h = harness()
     const res = await h.get("/jogo/1")

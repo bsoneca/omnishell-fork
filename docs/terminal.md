@@ -301,7 +301,10 @@ renderer and the test harness). The
 interpreter reads one ambient document, so renders are serial; a request for an
 address already rendering waits for that render, and past a bounded queue
 (`RENDER_QUEUE`) a request is answered 503
-([`render-server.test.ts`](../test/render-server.test.ts)). The app's service
+([`render-server.test.ts`](../test/render-server.test.ts)). A renderer whose CPU is
+throttled between requests hears no change while it rests, so `RENDER_REST_MS`
+(off by default) names a rest after which the first request lets every held
+document go and waits `RENDER_WAKE_MS` (1000) for the store to catch up first. The app's service
 worker paints a navigation from the copy it keeps, online or not, and
 revalidates it behind the paint, dropping the copy of an address answered 404,
 410 or private since ([`offline-sw.test.ts`](../test/offline-sw.test.ts));

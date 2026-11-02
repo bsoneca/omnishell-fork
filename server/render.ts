@@ -17,6 +17,12 @@
 // before the document is held means it is answered and not held. Nothing
 // guesses a lifetime. A 404 is not held: a row that does not exist yet will.
 //
+// Where its CPU is throttled between requests (a Cloud Run service on less
+// than a whole one), neither the store's sync nor those wakes run while it
+// rests. RENDER_REST_MS names how long a rest that may have been is: the first
+// request after a longer one lets every held document go and gives the store
+// RENDER_WAKE_MS to take in what it missed before anything is drawn.
+//
 // The interpreter reads one ambient document, so documents are rendered one
 // at a time, and a request for one already being rendered waits for that one.
 //
@@ -88,6 +94,8 @@ export function createRenderer({
   capacity,
   queue,
   cacheableRead = () => true,
+  rest,
+  now = Date.now,
 }: {
   store: Store;
   /** What every document's absolute links are spelled against. */
@@ -99,6 +107,11 @@ export function createRenderer({
   queue: number;
   /** Whether changes to this read can invalidate a retained document. */
   cacheableRead?: (table: string) => boolean;
+  /** After no request for longer than `ms`, the held documents are let go and
+   * `wake` is awaited before the next is answered: the store's turn to catch
+   * up on what a throttled CPU kept it from hearing. */
+  rest?: { ms: number; wake: () => Promise<void> };
+  now?: () => number;
 }): Renderer {
   // The render in progress. Each read it makes is listened to at once, beside
   // the region that made it and on the same view: a change landing anywhere
@@ -139,6 +152,17 @@ export function createRenderer({
     stopAll(entry.ticket);
   };
   const drawing = new Map<string, Promise<Drawn>>();
+  let last: number | undefined;
+  let waking: Promise<void> | null = null;
+  const awake = () => {
+    const t = now();
+    if (rest !== undefined && last !== undefined && t - last > rest.ms && waking === null) {
+      for (const key of [...held.keys()]) drop(key);
+      waking = rest.wake().finally(() => (waking = null));
+    }
+    last = t;
+    return waking;
+  };
   let turn: Promise<unknown> = Promise.resolve();
   const serially = <T>(fn: () => Promise<T>): Promise<T> => {
     const next = turn.then(fn);
@@ -227,6 +251,7 @@ export function createRenderer({
       return held.size;
     },
     async handle(req) {
+      await awake();
       const url = new URL(req.url);
       const found = route(url.pathname, url.search);
       if (found === null) return new Response("no such address\n", { status: 404 });
@@ -358,6 +383,8 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   const capacity = Number(env("RENDER_CAPACITY") ?? "512");
   const queue = Number(env("RENDER_QUEUE") ?? "64");
   const port = Number(env("PORT") ?? "8090");
+  const restMs = Number(env("RENDER_REST_MS") ?? "0");
+  const wakeMs = Number(env("RENDER_WAKE_MS") ?? "1000");
   const doorTimeout = Number(env("DOOR_TIMEOUT_MS"));
   if (!(doorTimeout > 0)) throw new Error(`DOOR_TIMEOUT_MS is ${env("DOOR_TIMEOUT_MS")}: the renderer bounds every read through its door`);
 
@@ -428,6 +455,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
     capacity,
     queue,
     cacheableRead,
+    rest: restMs > 0 ? { ms: restMs, wake: () => new Promise((r) => setTimeout(r, wakeMs)) } : undefined,
     // The door has already chosen the language: an unprefixed address reaching
     // here is the default's, so no preference is consulted.
     route: (pathname, search) => routeAt(cfg, pathname, search, []) as Found | null,
