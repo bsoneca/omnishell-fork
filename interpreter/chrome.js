@@ -204,7 +204,27 @@ export function describe(doc, cfg, { route, params, locale, written, el, origin 
     title = doc.createElement("title");
     doc.head.append(title);
   }
-  title.textContent = name ? `${name} — ${cfg.app}` : cfg.app;
+  // A screen can word its own head: an element marked `data-head="title"` is the
+  // whole title (a screen that names the app itself, as a link's preview reads
+  // it), and `data-head="description"` is what the page says it is, in place of
+  // the app's one line. They are bound like any text, so a row's columns and the
+  // reader's language are in them; a screen without them, or whose row has not
+  // landed (they are empty), keeps the h1 and the app's description.
+  const headed = (kind) => el.querySelector(`[data-head="${kind}"]`)?.textContent?.trim() || undefined;
+  title.textContent = headed("title") ?? (name ? `${name} — ${cfg.app}` : cfg.app);
+  const blurb = headed("description");
+  if (blurb !== undefined) {
+    for (const [attr, key] of [["name", "description"], ["property", "og:description"], ["name", "twitter:description"]]) {
+      let meta = doc.head.querySelector(`meta[${attr}="${key}"]`);
+      if (meta === null) {
+        if (key === "twitter:description") continue;
+        meta = doc.createElement("meta");
+        meta.setAttribute(attr, key);
+        doc.head.append(meta);
+      }
+      meta.setAttribute("content", blurb);
+    }
+  }
 
   for (const old of doc.head.querySelectorAll('link[rel="canonical"], link[rel="alternate"][hreflang]')) {
     old.remove();

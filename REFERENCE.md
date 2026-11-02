@@ -36,6 +36,14 @@ A placeholder names one of four things, told apart by prefix in `lookup()`
 | `{msg.key}` | the message `key` in the active locale's catalogue, then the app's default catalogue; `a.b` descends into a nested catalogue. A key neither answers throws — the markup named a message nobody wrote |
 | `{msg[column]}` | the message whose key the ROW carries in `column`: a writer stored a key rather than a sentence, so the reader's locale chooses the text. A column holding nothing renders nothing, and a key no catalogue answers renders as the key itself, because row data never takes a screen down (`check i18n` reports it) |
 
+A screen words its own head with elements marked `data-head`, bound like any
+text: `data-head="title"` is the whole document title (otherwise the h1 and the
+app's name), and `data-head="description"` is the page's description, also the
+`og:description` of its card (otherwise the app's line). One whose row has not
+landed is empty and leaves the default, so a link's preview reads the row's
+public columns in the reader's language:
+`<span hidden data-head="title" data-text="{msg.invite_title}"></span>`.
+
 `data-machine` is a declaration: its placeholders remain intact during DOM
 binding. An effect resolves them against the machine row after its transition's
 assignments, so `{title}` inside `effect.values` reads the draft at submit time.
