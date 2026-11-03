@@ -509,4 +509,88 @@ describe("the server terminal's store", () => {
     await expect(hung).rejects.toThrow("refused")
     expect(await watch.during(Promise.resolve("drawn"))).toBe("drawn")
   })
+
+  it("lets go of a render a refusal failed once it ends", async () => {
+    const watch = watchRefusals()
+    let end!: (v: string) => void
+    const letGo: string[] = []
+    const late = watch.during(new Promise<string>((resolve) => (end = resolve)), (v) => letGo.push(v))
+    watch.refused(new Error("refused"))
+    await expect(late).rejects.toThrow("refused")
+    end("handle")
+    await new Promise((r) => setTimeout(r, 0))
+    expect(letGo).toEqual(["handle"])
+    // A refusal in the turn the render ended: the render won, and is the caller's.
+    let both!: (v: string) => void
+    const same = watch.during(new Promise<string>((resolve) => (both = resolve)), (v) => letGo.push(v))
+    both("same turn")
+    watch.refused(new Error("refused"))
+    expect(await same).toBe("same turn")
+    await new Promise((r) => setTimeout(r, 0))
+    expect(letGo).toEqual(["handle"])
+    // A render that ends in time is the caller's, not let go.
+    const fine: string[] = []
+    expect(await watch.during(Promise.resolve("kept"), (v) => fine.push(v))).toBe("kept")
+    await new Promise((r) => setTimeout(r, 0))
+    expect(fine).toEqual([])
+  })
+
+  describe("a refused read", () => {
+    const names = ["location", "document", "CSS", "requestAnimationFrame", "fetch"] as const
+    const global = globalThis as unknown as Record<string, unknown>
+    // Runs `body` in the world the renderer installs, whose door answers 401
+    // to the token "old" and a row list to any other.
+    const inWorld = async (refused: () => Promise<void>, body: (seen: string[]) => Promise<void>, stored = "old") => {
+      const ambient = names.map((n) => [n, Object.getOwnPropertyDescriptor(globalThis, n)] as const)
+      const seen: string[] = []
+      try {
+        inhabit("http://caddy:8080", () => refused())
+        global.fetch = (_url: string, init?: { headers?: Record<string, string> }) => {
+          const auth = init?.headers?.Authorization ?? ""
+          seen.push(auth)
+          return Promise.resolve(auth === "" || auth.endsWith("old") ? new Response("", { status: 401 }) : Response.json([]))
+        }
+        if (stored !== "") sessionStorage.setItem("pronto-token", JSON.stringify({ token: stored }))
+        await body(seen)
+      } finally {
+        for (const [n, d] of ambient) {
+          if (d === undefined) delete global[n]
+          else Object.defineProperty(globalThis, n, d)
+        }
+        sessionStorage.removeItem("pronto-token")
+      }
+    }
+    const read = () => createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS }).query("game", null, {})
+    const within = (work: Promise<unknown>) =>
+      Promise.race([work.then(() => "answered", (e) => String(e)), new Promise((r) => setTimeout(() => r("pending"), 200))])
+
+    it("is sent again with the guest minted afresh", async () => {
+      // A refused /auth/shape stayed pending after the renewal, so the shape
+      // stream stayed blocked and a render needing it hung.
+      await inWorld(async () => sessionStorage.setItem("pronto-token", JSON.stringify({ token: "new" })), async (seen) => {
+        expect(await within(read())).toBe("answered")
+        expect(seen).toEqual(["Bearer old", "Bearer new"])
+      })
+    })
+
+    it("made while the guest was being renewed is sent with it too", async () => {
+      await inWorld(async () => sessionStorage.setItem("pronto-token", JSON.stringify({ token: "new" })), async (seen) => {
+        expect(await within(read())).toBe("answered")
+        expect(seen).toEqual(["", "Bearer new"])
+      }, "")
+    })
+
+    it("fails where no guest comes", async () => {
+      await inWorld(() => Promise.reject(new Error("no guest was minted")), async () => {
+        expect(await within(read())).toContain("no guest was minted")
+      })
+    })
+
+    it("fails where the renewed guest is refused too, and asks no third time", async () => {
+      await inWorld(async () => sessionStorage.setItem("pronto-token", JSON.stringify({ token: "old" })), async (seen) => {
+        expect(await within(read())).toContain("refused the renewed token")
+        expect(seen.length).toBe(2)
+      })
+    })
+  })
 })

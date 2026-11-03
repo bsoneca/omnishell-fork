@@ -313,12 +313,18 @@ export function watchRefusals() {
     refused(err: unknown) {
       for (const fail of waiting) fail(err);
     },
-    during<T>(work: Promise<T>): Promise<T> {
+    /** `abandoned` takes what the work comes to once a refusal has failed it. */
+    during<T>(work: Promise<T>, abandoned?: (late: T) => void): Promise<T> {
       let fail!: (err: unknown) => void;
       const refusal = new Promise<never>((_, reject) => (fail = reject));
       waiting.add(fail);
-      work.catch(() => {});
-      return Promise.race([work, refusal]).finally(() => waiting.delete(fail));
+      return Promise.race([work, refusal]).catch((err) => {
+        // Where the refusal won, the work is let go of when it ends; where the
+        // work ended first it won the race, whatever came after, and is the
+        // caller's (a work that failed has nothing to let go of).
+        work.then((late) => abandoned?.(late), () => {});
+        throw err;
+      }).finally(() => waiting.delete(fail));
     },
   };
 }
@@ -376,10 +382,11 @@ const parse = (html: string) => (parseHTML(html) as unknown as { document: unkno
  * markup by URL against the door. Its location is the door's root, and a
  * reload: a page reloads when the door refuses its token, to be gated again
  * (data-sync.js); a renderer has no gate, so its reload says the token was
- * refused, for a guest to be minted afresh. The refused read waits on, as a
- * page's does, and the render it belongs to is failed by `refusals`.
+ * refused and returns the guest minted afresh, which the refused read waits
+ * for and is sent again with (a rejection fails it); the render it belongs to
+ * is failed by `refusals` meanwhile.
  */
-export function inhabit(door: string, refused: (err: unknown) => void): void {
+export function inhabit(door: string, refused: (err: unknown) => unknown): void {
   const global = globalThis as unknown as Record<string, unknown>;
   global.location = Object.assign(new URL(`${door}/`), {
     reload: () => refused(new Error(`the door at ${door} refused the renderer's token`)),
@@ -413,11 +420,16 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   // A refused token is not the renderer's end: it mints a guest afresh, and
   // the render in progress answers an error meanwhile.
   const refusals = watchRefusals();
-  let renewGuest = () => {};
+  let renewGuest = (): Promise<void> => Promise.resolve();
   inhabit(door, (err) => {
     console.error(err);
     refusals.refused(err);
-    renewGuest();
+    // The reads the refusal held wait for the guest, for as long as a read
+    // through the door may take.
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no guest was minted within ${doorTimeout} ms of the door's refusal`)), doorTimeout);
+      renewGuest().then(resolve, reject).finally(() => clearTimeout(timer));
+    });
   });
   globalThis.fetch = boundedFetch(globalThis.fetch, doorTimeout);
 
@@ -478,6 +490,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
       reads.start();
       let drawn;
       try {
+        // A render a refusal failed lets go of its subscriptions when it ends.
         drawn = await refusals.during(renderDocument({
           entry,
           parse,
@@ -492,7 +505,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
           rows: true,
           origin: base.origin,
           here: base.pathname,
-        }));
+        }), (late) => late.handle.stop());
       } finally {
         drawn?.handle.stop();
       }
