@@ -313,16 +313,26 @@ export function watchRefusals() {
     refused(err: unknown) {
       for (const fail of waiting) fail(err);
     },
-    /** `abandoned` takes what the work comes to once a refusal has failed it. */
-    during<T>(work: Promise<T>, abandoned?: (late: T) => void): Promise<T> {
+    /**
+     * `abandoned` takes what the work comes to once a refusal has failed it;
+     * the refusal is heard when the work has ended or `settleMs` has passed.
+     */
+    during<T>(work: Promise<T>, abandoned?: (late: T) => void, settleMs = 0): Promise<T> {
       let fail!: (err: unknown) => void;
       const refusal = new Promise<never>((_, reject) => (fail = reject));
       waiting.add(fail);
-      return Promise.race([work, refusal]).catch((err) => {
-        // Where the refusal won, the work is let go of when it ends; where the
-        // work ended first it won the race, whatever came after, and is the
-        // caller's (a work that failed has nothing to let go of).
-        work.then((late) => abandoned?.(late), () => {});
+      return Promise.race([work, refusal]).catch(async (err) => {
+        // Where the refusal won, the work is let go of once it ends, and the
+        // caller hears of the refusal after that: the work shares the
+        // document and the store with whatever the caller runs next. Where
+        // the work ended first it won the race, whatever came after, and is
+        // the caller's (a work that failed has nothing to let go of).
+        const ended = work.then((late) => abandoned?.(late), () => {});
+        if (settleMs > 0) {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([ended, new Promise((r) => (timer = setTimeout(r, settleMs)))]);
+          clearTimeout(timer);
+        }
         throw err;
       }).finally(() => waiting.delete(fail));
     },
@@ -505,7 +515,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
           rows: true,
           origin: base.origin,
           here: base.pathname,
-        }), (late) => late.handle.stop());
+        }), (late) => late.handle.stop(), doorTimeout);
       } finally {
         drawn?.handle.stop();
       }

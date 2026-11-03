@@ -504,8 +504,10 @@ describe("the server terminal's store", () => {
     // The refused read never settles, so its render waited on it for ever and
     // the request hung while the single instance took no other.
     const watch = watchRefusals()
-    const hung = watch.during(new Promise<string>(() => {}))
+    let end!: (v: string) => void
+    const hung = watch.during(new Promise<string>((resolve) => (end = resolve)))
     watch.refused(new Error("refused"))
+    end("late")
     await expect(hung).rejects.toThrow("refused")
     expect(await watch.during(Promise.resolve("drawn"))).toBe("drawn")
   })
@@ -514,11 +516,16 @@ describe("the server terminal's store", () => {
     const watch = watchRefusals()
     let end!: (v: string) => void
     const letGo: string[] = []
-    const late = watch.during(new Promise<string>((resolve) => (end = resolve)), (v) => letGo.push(v))
+    const late = watch.during(new Promise<string>((resolve) => (end = resolve)), (v) => letGo.push(v), 1000)
     watch.refused(new Error("refused"))
-    await expect(late).rejects.toThrow("refused")
-    end("handle")
+    // The refusal is heard once the render has ended, which shares the
+    // document with whatever runs next.
+    let heard = false
+    const refused = late.catch((e) => { heard = true; throw e })
     await new Promise((r) => setTimeout(r, 0))
+    expect(heard).toBe(false)
+    end("handle")
+    await expect(refused).rejects.toThrow("refused")
     expect(letGo).toEqual(["handle"])
     // A refusal in the turn the render ended: the render won, and is the caller's.
     let both!: (v: string) => void
@@ -533,6 +540,13 @@ describe("the server terminal's store", () => {
     expect(await watch.during(Promise.resolve("kept"), (v) => fine.push(v))).toBe("kept")
     await new Promise((r) => setTimeout(r, 0))
     expect(fine).toEqual([])
+  })
+
+  it("hears a refusal after the settle bound where the render does not end", async () => {
+    const watch = watchRefusals()
+    const stuck = watch.during(new Promise<string>(() => {}), undefined, 20)
+    watch.refused(new Error("refused"))
+    await expect(stuck).rejects.toThrow("refused")
   })
 
   describe("a refused read", () => {
