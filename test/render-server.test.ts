@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@test/harness"
-import { admittedOrigin, boundedFetch, createRenderer, inhabit, keepGuest, serve, warmEagerTables } from "../server/render.ts"
+import { admittedOrigin, boundedFetch, createRenderer, inhabit, keepGuest, serve, warmEagerTables, watchRefusals } from "../server/render.ts"
 import { createStore } from "../interpreter/data-sync.js"
 import { FIXTURE_CARRIERS } from "../interpreter/fixture-types.js"
 
@@ -404,9 +404,6 @@ describe("the server terminal's guest", () => {
     await keepGuest(
       async () => ({ token: tokenFor(now + 7 * 24 * 3600 + minted++) }),
       (g) => kept.push(g.token),
-      (err) => {
-        throw err
-      },
       (fn, ms) => scheduled.push({ fn, ms }),
     )
     expect(kept.length).toBe(1)
@@ -418,43 +415,81 @@ describe("the server terminal's guest", () => {
     expect(kept[1]).not.toBe(kept[0])
   })
 
-  it("ends the renderer when a renewal is refused", async () => {
+  it("is minted again, with growing pauses, while the door refuses a mint", async () => {
+    // A refused mint (Cloud Run's 401 while an IAM change lands) exited the
+    // renderer, the one instance of its service, and every document request
+    // was answered 429 until a new one started.
+    const now = Math.floor(Date.now() / 1000)
     let calls = 0
+    const kept: string[] = []
+    const pauses: number[] = []
+    const scheduled: number[] = []
+    const errors = console.error
+    console.error = () => {}
+    try {
+      await keepGuest(
+        async () => {
+          if (calls++ < 7) throw new Error("401 minting a guest")
+          return { token: tokenFor(now + 60) }
+        },
+        (g) => kept.push(g.token),
+        (fn, ms) => {
+          if (ms <= 30_000 && pauses.length < 7) {
+            pauses.push(ms)
+            fn()
+          } else scheduled.push(ms)
+        },
+      )
+    } finally {
+      console.error = errors
+    }
+    expect(pauses).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000])
+    expect(kept.length).toBe(1)
+    expect(scheduled.length).toBe(1)
+  })
+
+  it("renews at once when asked, and once at a time", async () => {
+    const now = Math.floor(Date.now() / 1000)
+    let minted = 0
+    const kept: string[] = []
     const scheduled: (() => void)[] = []
-    let died: unknown
-    await keepGuest(
-      async () => {
-        if (calls++ > 0) throw new Error("503 minting a guest")
-        return { token: tokenFor(Math.floor(Date.now() / 1000) + 60) }
-      },
-      () => {},
-      (err) => (died = err),
+    const renew = await keepGuest(
+      async () => ({ token: tokenFor(now + 3600 + minted++) }),
+      (g) => kept.push(g.token),
       (fn) => scheduled.push(fn),
     )
+    await Promise.all([renew(), renew()])
+    expect(minted).toBe(2)
+    expect(kept.length).toBe(2)
+    // The timer set before the renewal asked for is spent: one chain remains.
     scheduled[0]()
     await new Promise((r) => setTimeout(r, 0))
-    expect(String(died)).toContain("503 minting a guest")
+    expect(minted).toBe(2)
+    scheduled[1]()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(minted).toBe(3)
   })
 })
 
 describe("the server terminal's store", () => {
-  it("ends the renderer when the door refuses its token", async () => {
-    // A refused token was dropped and the read thrown: every render after
-    // went out with no token and answered 500, while held documents stood
-    // frozen behind a healthy /health until the next renewal. The world is
-    // the one the renderer installs, so a location without its reload fails
-    // here as it did there, with every read throwing past a healthy /health.
+  it("tells the renderer the door refused its token, and leaves the read waiting", async () => {
+    // A refused token ended the renderer, the one instance of its service.
+    // Before that, it was dropped and the read thrown: every render after went
+    // out with no token and answered 500, while held documents stood frozen
+    // behind a healthy /health until the next renewal. The world is the one
+    // the renderer installs, so a location without its reload fails here as it
+    // did there.
     const names = ["location", "document", "CSS", "requestAnimationFrame", "fetch"] as const
     const global = globalThis as unknown as Record<string, unknown>
     const ambient = names.map((n) => [n, Object.getOwnPropertyDescriptor(globalThis, n)] as const)
-    let died: unknown
+    let refused: unknown
     try {
-      inhabit("http://caddy:8080", (err) => (died = err))
+      inhabit("http://caddy:8080", (err) => (refused = err))
       global.fetch = () => Promise.resolve(new Response("", { status: 401 }))
       sessionStorage.setItem("pronto-token", JSON.stringify({ token: "refused" }))
       const read = createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS }).query("game", null, {})
       await new Promise((r) => setTimeout(r, 0))
-      expect(String(died)).toContain("refused")
+      expect(String(refused)).toContain("refused")
       expect(await Promise.race([read.then(() => "answered", () => "threw"), new Promise((r) => setTimeout(() => r("pending"), 10))])).toBe("pending")
     } finally {
       for (const [n, d] of ambient) {
@@ -463,5 +498,15 @@ describe("the server terminal's store", () => {
       }
       sessionStorage.removeItem("pronto-token")
     }
+  })
+
+  it("fails the render in progress when the door refuses the token, and the next one renders", async () => {
+    // The refused read never settles, so its render waited on it for ever and
+    // the request hung while the single instance took no other.
+    const watch = watchRefusals()
+    const hung = watch.during(new Promise<string>(() => {}))
+    watch.refused(new Error("refused"))
+    await expect(hung).rejects.toThrow("refused")
+    expect(await watch.during(Promise.resolve("drawn"))).toBe("drawn")
   })
 })

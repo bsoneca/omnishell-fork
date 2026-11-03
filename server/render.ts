@@ -254,24 +254,73 @@ export function createRenderer({
 /**
  * A guest kept for as long as the process runs: minted now, and again once
  * half its token's life is gone, so the store's next shape mint carries one
- * the gate accepts. A mint that fails is the renderer's end: a store holding a
- * refused token stops syncing and says nothing, and its documents would stand
- * frozen behind a healthy /health.
+ * the gate accepts. A mint that fails is tried again, with a pause that
+ * doubles up to RENEW_MAX_MS, for as long as it takes: the door refuses a
+ * token for a while whenever its access changes, and a renderer that exited
+ * for it was a single instance gone, every document with it. The returned
+ * function renews at once, for the store to call when the door refused its
+ * token; one renewal runs at a time.
  */
+const RENEW_FIRST_MS = 1_000;
+const RENEW_MAX_MS = 30_000;
+
 export async function keepGuest(
   mint: () => Promise<{ token: string }>,
   keep: (guest: { token: string }) => void,
-  die: (err: unknown) => void,
   later: (fn: () => void, ms: number) => unknown = setTimeout,
-): Promise<void> {
-  const renew = async () => {
+): Promise<() => Promise<void>> {
+  let renewing: Promise<void> | null = null;
+  let epoch = 0;
+  const attempt = async () => {
     const guest = await mint();
     const exp = JSON.parse(atob(guest.token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))).exp;
     if (typeof exp !== "number") throw new Error("the guest's token states no expiry");
     keep(guest);
-    later(() => renew().catch(die), Math.max(0, (exp * 1000 - Date.now()) / 2));
+    const mine = epoch;
+    later(() => {
+      if (mine === epoch) void renew();
+    }, Math.max(0, (exp * 1000 - Date.now()) / 2));
+  };
+  const renew = (): Promise<void> => {
+    renewing ??= (async () => {
+      epoch++;
+      for (let wait = RENEW_FIRST_MS;; wait = Math.min(wait * 2, RENEW_MAX_MS)) {
+        try {
+          return await attempt();
+        } catch (err) {
+          console.error(err);
+          await new Promise<void>((resolve) => later(resolve, wait));
+        }
+      }
+    })().finally(() => {
+      renewing = null;
+    });
+    return renewing;
   };
   await renew();
+  return renew;
+}
+
+/**
+ * What fails the render in progress when the door refuses the renderer's
+ * token: the refused read never settles, so the request it belongs to would
+ * hang, and the reader answered 429 behind it. The render fails at once, the
+ * request answers an error, and the door can fall back.
+ */
+export function watchRefusals() {
+  const waiting = new Set<(err: unknown) => void>();
+  return {
+    refused(err: unknown) {
+      for (const fail of waiting) fail(err);
+    },
+    during<T>(work: Promise<T>): Promise<T> {
+      let fail!: (err: unknown) => void;
+      const refusal = new Promise<never>((_, reject) => (fail = reject));
+      waiting.add(fail);
+      work.catch(() => {});
+      return Promise.race([work, refusal]).finally(() => waiting.delete(fail));
+    },
+  };
 }
 
 /**
@@ -326,14 +375,14 @@ const parse = (html: string) => (parseHTML(html) as unknown as { document: unkno
  * its clock knobs off location at module evaluation, and its stylesheet and
  * markup by URL against the door. Its location is the door's root, and a
  * reload: a page reloads when the door refuses its token, to be gated again
- * (data-sync.js); a renderer has no gate, and its store reads nothing more
- * past the refusal, so its reload is its end, and whatever runs it starts it
- * again with a guest minted afresh.
+ * (data-sync.js); a renderer has no gate, so its reload says the token was
+ * refused, for a guest to be minted afresh. The refused read waits on, as a
+ * page's does, and the render it belongs to is failed by `refusals`.
  */
-export function inhabit(door: string, die: (err: unknown) => void): void {
+export function inhabit(door: string, refused: (err: unknown) => void): void {
   const global = globalThis as unknown as Record<string, unknown>;
   global.location = Object.assign(new URL(`${door}/`), {
-    reload: () => die(new Error(`the door at ${door} refused the renderer's token`)),
+    reload: () => refused(new Error(`the door at ${door} refused the renderer's token`)),
   });
   global.document = parse("<!doctype html><html><head></head><body></body></html>");
   // A bound select or checkbox is drawn through the control's property, which
@@ -361,13 +410,15 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   const doorTimeout = Number(env("DOOR_TIMEOUT_MS"));
   if (!(doorTimeout > 0)) throw new Error(`DOOR_TIMEOUT_MS is ${env("DOOR_TIMEOUT_MS")}: the renderer bounds every read through its door`);
 
-  // Whatever ends the renderer says why, and exits so whatever runs it can
-  // start it again.
-  const die = (err: unknown) => {
+  // A refused token is not the renderer's end: it mints a guest afresh, and
+  // the render in progress answers an error meanwhile.
+  const refusals = watchRefusals();
+  let renewGuest = () => {};
+  inhabit(door, (err) => {
     console.error(err);
-    Deno.exit(1);
-  };
-  inhabit(door, die);
+    refusals.refused(err);
+    renewGuest();
+  });
   globalThis.fetch = boundedFetch(globalThis.fetch, doorTimeout);
 
   const read = async (path: string) => {
@@ -398,14 +449,13 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   }
   // A guest is who a document is rendered for, minted the way a reader's tab
   // mints one. Its token is the store's, through sessionStorage as in a tab.
-  await keepGuest(
+  renewGuest = await keepGuest(
     async () => {
       const minted = await fetch(`${door}/auth/guest`, { method: "POST" });
       if (!minted.ok) throw new Error(`${minted.status} minting a guest through ${door}: ${await minted.text()}`);
       return await minted.json();
     },
     (guest) => sessionStorage.setItem("pronto-token", JSON.stringify(guest)),
-    die,
   );
   // What a render reads through the door's /crud, carried in its document.
   const reads = recordReads(door, globalThis.fetch, (url) => readKey(url));
@@ -428,7 +478,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
       reads.start();
       let drawn;
       try {
-        drawn = await renderDocument({
+        drawn = await refusals.during(renderDocument({
           entry,
           parse,
           cfg,
@@ -442,7 +492,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
           rows: true,
           origin: base.origin,
           here: base.pathname,
-        });
+        }));
       } finally {
         drawn?.handle.stop();
       }
