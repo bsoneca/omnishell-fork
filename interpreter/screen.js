@@ -3840,11 +3840,33 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
           }
         }
       }
-      if (node) {
+      if (node && templates.length > 1) {
+        // A region with a template per kind: the served row was drawn from the
+        // kind its row had when it was served (or cached), and the store's row
+        // may be another kind by now. That is a kind flip, as a surviving row's
+        // is below, not a refusal: the served node is not this template's
+        // render, so the row is stamped fresh and the served one leaves with
+        // the pass's placement.
+        const item = tmpl.content.firstElementChild.cloneNode(true);
+        try {
+          // Kinds that share a tag differ by what they state, a static class
+          // among it: the adoption below would keep the wrong kind's node.
+          const klass = item.getAttribute("class");
+          if (klass !== null && !klass.includes("{") && klass !== node.getAttribute("class")) {
+            throw new ProgramError("the served row is another kind's");
+          }
+          if (region._prontoStale) morphTree(node, item.cloneNode(true), { slots: true });
+          adoptTree(item, node, { rows: !region._prontoStale });
+        } catch (err) {
+          if (!(err instanceof ProgramError)) throw err;
+          node = null;
+        }
+      } else if (node) {
         const item = tmpl.content.firstElementChild.cloneNode(true);
         if (region._prontoStale) morphTree(node, item.cloneNode(true), { slots: true });
         adoptTree(item, node, { rows: !region._prontoStale });
-      } else {
+      }
+      if (!node) {
         node = tmpl.content.firstElementChild.cloneNode(true);
         node.dataset.id = entry.ctx.row.id;
       }
