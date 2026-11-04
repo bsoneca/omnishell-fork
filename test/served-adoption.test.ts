@@ -577,4 +577,18 @@ describe("a served row whose kind has changed since it was served", () => {
     expect([...screen.querySelectorAll(".cards > *")].map((c) => c.getAttribute("class"))).toEqual(["loud"])
     handle.stop()
   })
+  it("is stamped fresh when the other kind states no class, or a class below its root", async () => {
+    const SHAPES = `<section class="screen" data-screen="wall">
+  <ul class="cards" data-live="note" data-order="position.asc">
+    <template data-item data-when="kind=eq.a"><li class="plain"><span class="x" data-text="{title}"></span></li></template>
+    <template data-item data-when="kind=eq.b"><li><span class="y" data-text="{title}"></span></li></template>
+    <template data-item><i hidden></i></template>
+  </ul>
+</section>`
+    const html = await served(SHAPES, { note: [{ id: "n1", title: "One", kind: "a", position: 1 }, { id: "n2", title: "Two", kind: "b", position: 2 }] })
+    const live = store({ note: [{ id: "n1", title: "One", kind: "b", position: 1 }, { id: "n2", title: "Two", kind: "a", position: 2 }] })
+    const { screen, handle } = await adopt(html, SHAPES, live)
+    expect([...screen.querySelectorAll(".cards > li")].map((c) => `${c.getAttribute("class") ?? ""}/${c.querySelector("span")!.getAttribute("class")}`)).toEqual(["/y", "plain/x"])
+    handle.stop()
+  })
 })

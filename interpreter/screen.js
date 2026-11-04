@@ -3849,12 +3849,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         // the pass's placement.
         const item = tmpl.content.firstElementChild.cloneNode(true);
         try {
-          // Kinds that share a tag differ by what they state, a static class
-          // among it: the adoption below would keep the wrong kind's node.
-          const klass = item.getAttribute("class");
-          if (klass !== null && !klass.includes("{") && klass !== node.getAttribute("class")) {
-            throw new ProgramError("the served row is another kind's");
-          }
+          // Kinds that share a tag differ by what they state: the adoption
+          // below would keep the wrong kind's node and bind its row to it.
+          if (!sameKind(item, node)) throw new ProgramError("the served row is another kind's");
           if (region._prontoStale) morphTree(node, item.cloneNode(true), { slots: true });
           adoptTree(item, node, { rows: !region._prontoStale });
         } catch (err) {
@@ -4658,6 +4655,26 @@ export function templateHash(text) {
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Whether a served node is the render of a template's item: the same tags down
+ * the tree, and the same class where the item states one (a class with no
+ * binding in it). Regions, templates and hatches under it are theirs to adopt.
+ * Two kinds of a row that share a tag and differ by a class are told apart
+ * here; adoptTree alone would keep the old kind's node.
+ */
+function sameKind(from, to) {
+  if (from.localName !== to.localName) return false;
+  if (from.localName === "template" || from.hasAttribute("data-live") || from.hasAttribute("data-hatch")) return true;
+  const klass = from.getAttribute("class");
+  if (klass === null ? to.getAttribute("class") !== null : !klass.includes("{") && klass !== to.getAttribute("class")) {
+    return false;
+  }
+  const theirs = [...to.children];
+  const ours = [...from.children];
+  if (ours.length !== theirs.length) return false;
+  return ours.every((child, at) => sameKind(child, theirs[at]));
 }
 
 /** A region whose children are rows: it states item templates, or names one. */
