@@ -106,11 +106,10 @@ describe("a list row bound from its template's plan", () => {
     try {
       await m.store.update("cell", "r2", { label: "deux", sel: "on", pos: 20 })
       await m.settle()
-      const row = m.one('.row[data-id="r2"]')
-      expect(row.querySelector(".name")!.textContent).toBe("deux")
-      expect(row.querySelector(".note")!.textContent).toBe("n:20")
-      expect(row.getAttribute("class")).toBe("row on")
-      expect(row.querySelector(".deep")!.getAttribute("title")).toBe("open deux")
+      expect(m.one('.row[data-id="r2"] .name').textContent).toBe("deux")
+      expect(m.one('.row[data-id="r2"] .note').textContent).toBe("n:20")
+      expect(m.one('.row[data-id="r2"]').getAttribute("class")).toBe("row on")
+      expect(m.one('.row[data-id="r2"] .deep').getAttribute("title")).toBe("open deux")
       // The untouched rows keep theirs.
       expect(m.one('.row[data-id="r1"] .name').textContent).toBe("one")
       expect(m.one('.row[data-id="r3"]').getAttribute("class")).toBe("row on")
