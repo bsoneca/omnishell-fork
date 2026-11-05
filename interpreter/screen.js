@@ -401,12 +401,12 @@ async function loadRole(screen, appBase, route, attr, role, listed = "handlers",
 // check is that the name is an event and that the handler is declared. The
 // value is a REFERENCE and never a body, which is what keeps the assembly
 // lintable and the reduce pure — an inline on<event> would be neither.
+// By name, not through el.attributes: reading that list makes an Attr and a
+// NamedNodeMap per element, which every stamped row would then hold.
 const onAttrs = (el) => {
   const out = [];
-  const attrs = el.attributes;
-  for (let i = 0; i < attrs.length; i++) {
-    const a = attrs[i];
-    if (a.name.startsWith("data-on-")) out.push({ event: a.name.slice("data-on-".length), name: a.value });
+  for (const name of el.getAttributeNames()) {
+    if (name.startsWith("data-on-")) out.push({ event: name.slice("data-on-".length), name: el.getAttribute(name) });
   }
   return out;
 };
@@ -1504,10 +1504,8 @@ function bindAttributes(scope, ctx) {
 
 /** Whether any of the element's own attributes is a binding. */
 function hasBoundAttribute(el) {
-  const attrs = el.attributes ?? [];
-  for (let i = 0; i < attrs.length; i++) {
-    const a = attrs[i];
-    if (!regionAttr(a.name) && PLACEHOLDER.test(a.value)) return true;
+  for (const name of el.getAttributeNames?.() ?? []) {
+    if (!regionAttr(name) && PLACEHOLDER.test(el.getAttribute(name))) return true;
   }
   return false;
 }
@@ -1598,7 +1596,6 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // setAttribute would consume the placeholder template; persistent regions
   // (singletons) re-bind on every refresh, so originals are stashed.
   let stash = el._prontoAttrs;
-  const attrs = el.attributes ?? [];
   if (stash === undefined) {
     if (!hasBoundAttribute(el)) return;
     stash = el._prontoAttrs = {};
@@ -1608,7 +1605,7 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // an empty boolean is absent, an empty href is not a URL — and iterating
   // only what is present would never visit it again, leaving it dead at the
   // first empty value it ever took.
-  const names = new Set([...attrs].map((a) => a.name));
+  const names = new Set(el.getAttributeNames?.() ?? []);
   for (const name of Object.keys(stash)) names.add(name);
   for (const name of names) {
     if (regionAttr(name)) continue;
