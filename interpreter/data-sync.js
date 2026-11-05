@@ -634,6 +634,9 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     }
     return p;
   }
+  // A table no validation names has nothing to judge, and asking per row is an
+  // await and a predicate sort per row of a bulk write.
+  const judged = (table) => Object.keys(validations[table] ?? {}).length > 0;
 
   // The store seat: every validation of the table judges the row the write
   // would produce (validate.js), over the reader's own copy of the rows its
@@ -2047,7 +2050,7 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     // the collection holds as a number is still that number when patched.
     const byKey = new Map(collection.toArray.map((r) => [String(r[key]), r]));
     const edgeIndex = new Map();
-    for (const row of rows) {
+    if (judged(table)) for (const row of rows) {
       const have = byKey.get(String(row[key]));
       if (have === undefined) await validate(table, "insert", blank(table, row), undefined, edgeIndex);
       else await validate(table, "update", row, have, edgeIndex);
@@ -2091,7 +2094,7 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     const key = keyOf(table);
     const filled = rows.map((r) => blank(table, r));
     const edgeIndex = new Map();
-    for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
+    if (judged(table)) for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
     if (requestOnly(table)) return serverCommand(table, "POST", filled);
     await settle(
       onSettled(client.insert(table, filled), table, filled.map((r) => String(r[key]))),
