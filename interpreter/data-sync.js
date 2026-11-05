@@ -695,13 +695,42 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     return filled;
   };
 
+  // A table's seed is its rows or, for one too large to ride in the config the
+  // first screen waits on, {href} naming a JSON array of them beside it (a
+  // page bundle writes these, by content address). The file is fetched the
+  // first time the table is read, and every such file once the page is idle,
+  // so a table the reader opens later, or offline, is already at hand.
+  const seedFiles = new Map();
+  const seedFile = (href) => {
+    let p = seedFiles.get(href);
+    if (p === undefined) {
+      p = fetch(new URL(href, cfg.appBase ?? globalThis.location?.href)).then((res) => {
+        if (!res.ok) throw new Error(`seed ${href}: ${res.status}`);
+        return res.json();
+      });
+      p.catch(() => seedFiles.delete(href));
+      seedFiles.set(href, p);
+    }
+    return p;
+  };
+  const seedRows = (table) => {
+    const s = cfg.seed?.[table];
+    return s === undefined || Array.isArray(s) ? s : seedFile(s.href);
+  };
+  const seedHrefs = Object.values(cfg.seed ?? {}).filter((s) => !Array.isArray(s)).map((s) => s.href);
+  if (seedHrefs.length > 0 && typeof globalThis.requestIdleCallback === "function") {
+    globalThis.requestIdleCallback(() => {
+      for (const href of seedHrefs) seedFile(href).catch(() => {});
+    }, { timeout: 10_000 });
+  }
+
   // Written straight through the client, not through create(): a seed is the
   // program stating the collection's initial world, not a reader's gesture, so
   // there is no refusal to settle and no key to mint — the program names each
   // row's own. Called only where the store is built, which is what makes the
   // empty collection the whole ledger #Entity.seed relies on.
   async function seed(table) {
-    const rows = restoredTabs.has(table) ? restoredTabs.get(table) : cfg.seed?.[table];
+    const rows = restoredTabs.has(table) ? restoredTabs.get(table) : await seedRows(table);
     if (rows === undefined) return;
     const c = client.collections[table];
     if (c === undefined) throw new Error(`seed on unknown table: ${table}`);
