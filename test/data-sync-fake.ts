@@ -55,6 +55,9 @@ export type FakeDataSync = {
   version: number;
   /** Wakes scheduled and not yet delivered. */
   pendingWakes: number;
+  /** Deliver every scheduled wake now, as the shipped store's does; answers
+   * how many there were. */
+  flushNotifications(): number;
 };
 
 /**
@@ -77,6 +80,19 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
   ])) };
   type Sub = { fn: (changes?: Change[]) => void; batch: Change[]; scheduled: boolean; stopped: boolean };
   const subs = new Map<string, Set<Sub>>();
+  // A scheduled wake by its subscription, so a flush can deliver it ahead of
+  // its timer and the timer then finds nothing to do.
+  const due = new Map<Sub, ReturnType<typeof setTimeout>>();
+  const deliver = (sub: Sub) => {
+    clearTimeout(due.get(sub));
+    due.delete(sub);
+    sub.scheduled = false;
+    store.pendingWakes--;
+    const changes = sub.batch;
+    sub.batch = [];
+    // A region torn down before its wake is not woken.
+    if (!sub.stopped) sub.fn(changes);
+  };
   const minted = new Map<string, number>();
   const mintId = (table: string) => {
     const n = (minted.get(table) ?? 0) + 1;
@@ -139,15 +155,13 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
       if (sub.scheduled) continue;
       sub.scheduled = true;
       store.pendingWakes++;
-      setTimeout(() => {
-        sub.scheduled = false;
-        store.pendingWakes--;
-        const changes = sub.batch;
-        sub.batch = [];
-        // A region torn down before its wake is not woken.
-        if (!sub.stopped) sub.fn(changes);
-      }, 0);
+      due.set(sub, setTimeout(() => deliver(sub), 0));
     }
+  };
+  store.flushNotifications = () => {
+    const queued = [...due.keys()];
+    for (const sub of queued) deliver(sub);
+    return queued.length;
   };
 
   store.rows = (table) => of(table);

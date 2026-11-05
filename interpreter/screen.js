@@ -2437,6 +2437,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         form.querySelector(".store-error")?.removeAttribute("hidden");
         setState(err?.name === "NonRetriableError" ? "validation-error" : "network-error");
       };
+      const began = performance.now();
       track((async () => {
         try {
           // A form's create mints the key the store now requires of every write:
@@ -2458,6 +2459,13 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             await store.dropWhere(entity, interpolateFilter(form.dataset.filter, wiring().getCtx()), refused);
           } else if (action === "delete") await store.drop(entity, [wiring().rowId()], refused);
           else throw new Error(`unknown action: ${action}`);
+          // The write has landed, so its regions are woken in the submit's own
+          // task, as a handler's fold's are (wireEvents): a wake left to the
+          // store's turn runs inside the next frame and the paint waits on it.
+          // Only while this submit is the store's one write in flight, and only
+          // when the store answered promptly — a synced table answers when the
+          // server does, long after the frame.
+          if (inFlight.get(store) === 1 && performance.now() - began <= PROMPT_FOLD_MS) store.flushNotifications?.();
           dirty.add(entity);
           // Only a create is reset, ready for the next row. Any other form's
           // controls already show the row the write stated, and a reset would put
