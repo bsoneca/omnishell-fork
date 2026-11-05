@@ -401,10 +401,15 @@ async function loadRole(screen, appBase, route, attr, role, listed = "handlers",
 // check is that the name is an event and that the handler is declared. The
 // value is a REFERENCE and never a body, which is what keeps the assembly
 // lintable and the reduce pure — an inline on<event> would be neither.
-const onAttrs = (el) =>
-  [...el.attributes]
-    .filter((a) => a.name.startsWith("data-on-"))
-    .map((a) => ({ event: a.name.slice("data-on-".length), name: a.value }));
+// By name, not through el.attributes: reading that list makes an Attr and a
+// NamedNodeMap per element, which every stamped row would then hold.
+const onAttrs = (el) => {
+  const out = [];
+  for (const name of el.getAttributeNames()) {
+    if (name.startsWith("data-on-")) out.push({ event: name.slice("data-on-".length), name: el.getAttribute(name) });
+  }
+  return out;
+};
 
 /** The adapter a control names, or undefined. Modules are loaded once per
  * screen and reached through the ctx every binding already carries. null is
@@ -1136,9 +1141,21 @@ function nestedBindings(el, ctx) {
   return out.join("\u0000");
 }
 
+// A template's text split around its placeholders, kept: the same few strings
+// are interpolated once per row of every list. Odd entries are the
+// expressions. Bounded, since a caller may hand it text no markup wrote.
+const splitTemplates = new Map();
 function interpolate(template, ctx) {
   if (Array.isArray(template)) return evaluateAst(template, ctx, localeOf(ctx));
-  return template.replace(PLACEHOLDERS, (_, expr) => String(lookup(expr, ctx) ?? ""));
+  let parts = splitTemplates.get(template);
+  if (parts === undefined) {
+    if (splitTemplates.size >= 4096) splitTemplates.clear();
+    parts = template.split(PLACEHOLDERS);
+    splitTemplates.set(template, parts);
+  }
+  let out = parts[0];
+  for (let i = 1; i < parts.length; i += 2) out += String(lookup(parts[i], ctx) ?? "") + parts[i + 1];
+  return out;
 }
 
 function interpolateFilter(template, ctx) {
@@ -1186,19 +1203,71 @@ const HAS_MOVE_BEFORE = typeof globalThis.Element?.prototype?.moveBefore === "fu
 // the animations the stamp actually started, and fall back to releasing at
 // once where none run — a reduced-motion viewer, or an engine without the
 // Animations API.
+//
+// Asked when the pass has placed its nodes (answerSettles), not a frame later:
+// getAnimations resolves style itself, so it already sees what data-enter or
+// data-exit started, and a row with nothing to play leaves before the paint
+// instead of standing one frame inert. The frame is the fallback for a node no
+// pass has placed yet.
+const settling = new Set();
 function settle(node, done) {
-  raf(() => {
-    const running = node.getAnimations?.({ subtree: true }) ?? [];
-    if (running.length === 0) return done();
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      done();
-    };
-    Promise.allSettled(running.map((a) => a.finished)).then(finish);
-    setTimeout(finish, MOTION_CAP_MS);
-  });
+  const entry = { node, done };
+  settling.add(entry);
+  entry.frame = globalThis.requestAnimationFrame?.(() => answer(entry));
+  if (entry.frame === undefined) setTimeout(() => answer(entry), 0);
+}
+
+function answer(entry, running = entry.node.getAnimations?.({ subtree: true }) ?? []) {
+  if (!settling.delete(entry)) return;
+  if (entry.frame !== undefined) globalThis.cancelAnimationFrame?.(entry.frame);
+  if (running.length === 0) return entry.done();
+  let settled = false;
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    entry.done();
+  };
+  Promise.allSettled(running.map((a) => a.finished)).then(finish);
+  setTimeout(finish, MOTION_CAP_MS);
+}
+
+/** Answers every settle whose node is in the document and can say what it is
+ * playing; an engine without the Animations API keeps its frame. Every node is
+ * read before any is released, so style resolves once for the pass. */
+function answerSettles() {
+  const placed = [...settling].filter((e) => e.node.isConnected && typeof e.node.getAnimations === "function");
+  const running = placed.map((e) => e.node.getAnimations({ subtree: true }));
+  placed.forEach((e, i) => answer(e, running[i]));
+}
+
+/** The nodes of `order` that keep their place when a list is re-placed: the
+ * longest run of them already in document order (`at` maps each node in the
+ * region to its index). Every other node moves, so a swap moves two rows, not
+ * every row between them. */
+function steadyNodes(order, at) {
+  const tails = []; // tails[n]: the order index ending the best run of length n + 1
+  const tailAt = [];
+  const prev = new Int32Array(order.length);
+  for (let k = 0; k < order.length; k++) {
+    const p = at.get(order[k]);
+    if (p === undefined) continue;
+    let lo = tails.length;
+    if (lo > 0 && tailAt[lo - 1] > p) {
+      let hi = lo - 1;
+      lo = 0;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (tailAt[mid] < p) lo = mid + 1;
+        else hi = mid;
+      }
+    }
+    prev[k] = lo > 0 ? tails[lo - 1] : -1;
+    tails[lo] = k;
+    tailAt[lo] = p;
+  }
+  const steady = new Set();
+  for (let k = tails.length > 0 ? tails[tails.length - 1] : -1; k >= 0; k = prev[k]) steady.add(order[k]);
+  return steady;
 }
 
 function playEnter(node) {
@@ -1360,31 +1429,34 @@ function emptyNote(region, copy, ctx, item) {
   region.append(note);
 }
 
+function bindText(el, ctx, renderers) {
+  const textAttr = el.getAttribute("data-text");
+  if (textAttr === null) return;
+  const format = el.getAttribute("data-text-format") ?? undefined;
+  // Written only where it differs: a served row already saying it keeps
+  // its text node, and the reader's selection in it.
+  const write = (text) => {
+    if (el.textContent !== text) el.textContent = text;
+  };
+  if (VALUE_FORMATS.has(format)) {
+    write(textAttr.replace(PLACEHOLDERS, (_, expr) =>
+      ({ datetime: formatDatetime, date: formatDate, time: formatTime, number: formatNumber })[format](lookup(expr, ctx), ctx),
+    ));
+  } else if (format !== undefined && format !== "plain") {
+    const render = renderers[format];
+    // Every format resolves at hydration, so an unresolved one can only be
+    // the fixture adapter, which evaluates no Jessie. It shows the value as
+    // text there, the way it shows a widget's markup unenhanced.
+    if (render === undefined) write(interpolate(textAttr, ctx));
+    else renderInto(render, interpolate(textAttr, ctx), el);
+  } else {
+    write(interpolate(textAttr, ctx));
+  }
+}
+
 function bindTexts(scope, ctx, renderers = {}) {
   const visit = (el) => {
-    const textAttr = el.getAttribute("data-text");
-    if (textAttr !== null) {
-      const format = el.getAttribute("data-text-format") ?? undefined;
-      // Written only where it differs: a served row already saying it keeps
-      // its text node, and the reader's selection in it.
-      const write = (text) => {
-        if (el.textContent !== text) el.textContent = text;
-      };
-      if (VALUE_FORMATS.has(format)) {
-        write(textAttr.replace(PLACEHOLDERS, (_, expr) =>
-          ({ datetime: formatDatetime, date: formatDate, time: formatTime, number: formatNumber })[format](lookup(expr, ctx), ctx),
-        ));
-      } else if (format !== undefined && format !== "plain") {
-        const render = renderers[format];
-        // Every format resolves at hydration, so an unresolved one can only be
-        // the fixture adapter, which evaluates no Jessie. It shows the value as
-        // text there, the way it shows a widget's markup unenhanced.
-        if (render === undefined) write(interpolate(textAttr, ctx));
-        else renderInto(render, interpolate(textAttr, ctx), el);
-      } else {
-        write(interpolate(textAttr, ctx));
-      }
-    }
+    bindText(el, ctx, renderers);
     if (el.hasAttribute("data-text-format") || el.localName === "template") return;
     for (let child = el.firstElementChild; child !== null; child = child.nextElementSibling) {
       if (!child.hasAttribute("data-live")) visit(child);
@@ -1406,10 +1478,16 @@ function guardEdits(el) {
   });
 }
 
-function bindAttributes(scope, ctx) {
-  for (let parent = scope.parentElement; parent !== null; parent = parent.parentElement) {
-    if (parent.hasAttribute("data-text-format")) return;
+// Nodes a renderer produced are the row's own content, not authored markup.
+function insideRendered(el) {
+  for (let parent = el.parentElement; parent !== null; parent = parent.parentElement) {
+    if (parent.hasAttribute("data-text-format")) return true;
   }
+  return false;
+}
+
+function bindAttributes(scope, ctx) {
+  if (insideRendered(scope)) return;
   // Renderer output has no bindings; nested regions bind against their own
   // rows, and a template's markup against the rows it stamps (a DOM without
   // template content keeps it as children). Prune all three before walking a
@@ -1424,6 +1502,84 @@ function bindAttributes(scope, ctx) {
   visit(scope);
 }
 
+/** Whether any of the element's own attributes is a binding. */
+function hasBoundAttribute(el) {
+  for (const name of el.getAttributeNames?.() ?? []) {
+    if (!regionAttr(name) && PLACEHOLDER.test(el.getAttribute(name))) return true;
+  }
+  return false;
+}
+
+/**
+ * Where an item template's bindings sit, found once per template. Every row
+ * the template stamps is a clone of the same markup, so which of its elements
+ * carry bound attributes, a data-text or a data-on-* is a fact about the
+ * template; walking each clone to find them again is a walk of every element
+ * of every row, which is most of what a ten-thousand-row create spends. The
+ * plan is a list of child-index paths, in document order, each saying what
+ * its element is for:
+ *
+ * - attr and text: what bindAttributes and bindTexts would reach, with their
+ *   pruning — nothing below a data-text-format, a template or a nested
+ *   [data-live].
+ * - event: what wireEvents' bindTree would wire, the elements owned by the
+ *   item (no [data-live] between) that declare a data-on-*.
+ * - open: an owned element whose children are not the template's by the time
+ *   the row is wired, because a renderer or a hatch writes them. Its
+ *   descendants are walked then, the way bindTree walks everything.
+ */
+function bindingPlan(root) {
+  const plan = [];
+  // A data-text with elements under it writes over them, and the walks then
+  // never reach them; a plan made before the write would. Such a template is
+  // walked, row by row, as before.
+  let exact = true;
+  const walk = (el, path, bindable, owned) => {
+    const step = {
+      path,
+      attr: bindable && hasBoundAttribute(el),
+      text: bindable && el.hasAttribute("data-text"),
+      event: owned && onAttrs(el).length > 0,
+      open: owned && (el.hasAttribute("data-text-format") || el.hasAttribute("data-hatch")),
+    };
+    if (step.attr || step.text || step.event || step.open) plan.push(step);
+    if (step.text && !el.hasAttribute("data-text-format") && el.firstElementChild !== null) exact = false;
+    const below = bindable && !el.hasAttribute("data-text-format") && el.localName !== "template";
+    let i = 0;
+    for (let child = el.firstElementChild; child !== null; child = child.nextElementSibling, i++) {
+      const nested = child.hasAttribute("data-live");
+      walk(child, [...path, i], below && !nested, owned && !step.open && !nested);
+    }
+  };
+  walk(root, [], true, true);
+  return exact ? plan : undefined;
+}
+
+/** The plan's elements in a fresh clone of its template, by path. By sibling
+ * steps, not `children`: each element's `children` is a live collection the
+ * document then invalidates on every insertion, and ten thousand rows' worth
+ * makes placing them quadratic. */
+function planned(plan, node) {
+  const els = plan.map(({ path }) => {
+    let el = node;
+    for (const i of path) {
+      el = el.firstElementChild;
+      for (let k = 0; k < i; k++) el = el.nextElementSibling;
+    }
+    return el;
+  });
+  return { plan, els, unbound: true };
+}
+
+/** bindAttributes then bindTexts over a fresh clone, by its plan: the same
+ * elements in the same order, without the walk. */
+function bindPlanned(scope, { plan, els }, ctx, renderers = {}) {
+  if (!insideRendered(scope)) {
+    for (let i = 0; i < plan.length; i++) if (plan[i].attr) bindElementAttributes(els[i], ctx, true);
+  }
+  for (let i = 0; i < plan.length; i++) if (plan[i].text) bindText(els[i], ctx, renderers);
+}
+
 /**
  * One element's bound attributes. Split out because a LIST region's own
  * element belongs to nobody else's pass: its parent's stops at it (ownedBy
@@ -1436,25 +1592,12 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // Nodes a renderer produced are the row's own content, not authored
   // markup: nothing in them is a binding, and the braces an author wrote
   // name no column.
-  if (!insideWalk) {
-    for (let parent = el.parentElement; parent !== null; parent = parent.parentElement) {
-      if (parent.hasAttribute("data-text-format")) return;
-    }
-  }
+  if (!insideWalk && insideRendered(el)) return;
   // setAttribute would consume the placeholder template; persistent regions
   // (singletons) re-bind on every refresh, so originals are stashed.
   let stash = el._prontoAttrs;
-  const attrs = el.attributes ?? [];
   if (stash === undefined) {
-    let hasBound = false;
-    for (let i = 0; i < attrs.length; i++) {
-      const a = attrs[i];
-      if (!regionAttr(a.name) && PLACEHOLDER.test(a.value)) {
-        hasBound = true;
-        break;
-      }
-    }
-    if (!hasBound) return;
+    if (!hasBoundAttribute(el)) return;
     stash = el._prontoAttrs = {};
   }
   // The names to consider are the element's attributes AND every name already
@@ -1462,7 +1605,7 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // an empty boolean is absent, an empty href is not a URL — and iterating
   // only what is present would never visit it again, leaving it dead at the
   // first empty value it ever took.
-  const names = new Set([...attrs].map((a) => a.name));
+  const names = new Set(el.getAttributeNames?.() ?? []);
   for (const name of Object.keys(stash)) names.add(name);
   for (const name of names) {
     if (regionAttr(name)) continue;
@@ -1620,6 +1763,18 @@ function staticOrParam(template, ctx) {
 // declarations, which is what a data-hatch name resolves against. opts.routes
 // and opts.i18n are the table every link's address is composed from, and
 // opts.navigate is how a navigate form reaches the terminal's stack.
+// How long a fold may take writing, in milliseconds, and still have its regions
+// woken in the event's own task. The pass that places the rows grows with the
+// rows written: a fold of a few rows is over in a millisecond, one of ten
+// thousand writes for tens of them and places them for hundreds. A pass that
+// long is many frames whatever task it runs in, and run in the event's it holds
+// the next key or click behind it; in a task of its own the input goes first.
+const PROMPT_FOLD_MS = 4;
+
+// Work in flight, by store, across every screen it serves: a document's slots
+// share one store, and a flush of its wakes reaches all of their regions.
+const inFlight = new WeakMap();
+
 export async function interpretScreen(mount, appBase, route, store, params = {}, opts = {}) {
   const screenOpts = opts;
   const hostDom = await hostDomScreen(route, appBase, opts.hostDom ?? {}, opts);
@@ -1652,15 +1807,20 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     failure ??= err;
   };
   const track = (promise) => {
-    const tracked = promise.then((value) => {
+    const done = () => {
       work.delete(tracked);
+      inFlight.set(store, inFlight.get(store) - 1);
+    };
+    const tracked = promise.then((value) => {
+      done();
       return value;
     }, (err) => {
-      work.delete(tracked);
+      done();
       failed(err);
       throw err;
     });
     work.add(tracked);
+    inFlight.set(store, (inFlight.get(store) ?? 0) + 1);
     return tracked;
   };
   const finite = (run) => {
@@ -2274,6 +2434,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         form.querySelector(".store-error")?.removeAttribute("hidden");
         setState(err?.name === "NonRetriableError" ? "validation-error" : "network-error");
       };
+      const began = performance.now();
       track((async () => {
         try {
           // A form's create mints the key the store now requires of every write:
@@ -2295,6 +2456,13 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             await store.dropWhere(entity, interpolateFilter(form.dataset.filter, wiring().getCtx()), refused);
           } else if (action === "delete") await store.drop(entity, [wiring().rowId()], refused);
           else throw new Error(`unknown action: ${action}`);
+          // The write has landed, so its regions are woken in the submit's own
+          // task, as a handler's fold's are (wireEvents): a wake left to the
+          // store's turn runs inside the next frame and the paint waits on it.
+          // Only while this submit is the store's one write in flight, and only
+          // when the store answered promptly — a synced table answers when the
+          // server does, long after the frame.
+          if (inFlight.get(store) === 1 && performance.now() - began <= PROMPT_FOLD_MS) store.flushNotifications?.();
           dirty.add(entity);
           // Only a create is reset, ready for the next row. Any other form's
           // controls already show the row the write stated, and a reset would put
@@ -2669,6 +2837,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         el.addEventListener(event, async (e) => {
           const reduce = handlers.get(el.getAttribute(`data-on-${event}`));
           if (!reduce) return;
+          const began = performance.now();
           try {
             const fired = { type: event };
             if (id !== undefined) fired.id = id;
@@ -2701,6 +2870,18 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             // built and never the unit's own object.
             if (e?.detail !== null && typeof e?.detail === "object") fired.detail = e.detail;
             await step(reduce, fired, 0);
+            // The fold's writes have all landed, so the regions they moved are
+            // woken now, in the event's own task. After a click Chrome holds
+            // every task the click posted, even a user-blocking one, until it
+            // has rendered: the store's wake would run in the next frame's
+            // animation callback, inside that frame, and its paint waits on
+            // the work. Done here, the work is over before the frame begins.
+            // Only while no other fold on the store is mid-write, this
+            // screen's or another slot's — between its drop and its put a
+            // fold is half applied, and its wake is left to the store's own
+            // turn. A fold that took long writing has a long pass to come,
+            // and it too is left to the store's turn (PROMPT_FOLD_MS).
+            if (inFlight.get(store) === 0 && performance.now() - began <= PROMPT_FOLD_MS) store.flushNotifications?.();
           } catch (err) {
             console.error(err);
             setState("network-error");
@@ -2713,7 +2894,23 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // its id; outside one it acts on what the region read. The walk stops at
     // the next [data-live], which binds its own.
     const bindTree = (root, id) => {
+      // A stamped item wires by its template's plan: the owned elements that
+      // declare a data-on-*, and the whole of whatever a renderer or a hatch
+      // has written since (bindingPlan).
+      const plan = root._prontoPlanned;
+      root._prontoPlanned = undefined;
       if (handlers.size === 0) return;
+      if (plan !== undefined) {
+        for (let i = 0; i < plan.plan.length; i++) {
+          const el = plan.els[i];
+          if (plan.plan[i].event) bind(el, id);
+          if (!plan.plan[i].open) continue;
+          for (const inner of el.querySelectorAll("*")) {
+            if (ownedBy(inner, root)) bind(inner, id);
+          }
+        }
+        return;
+      }
       bind(root, id);
       for (const el of root.querySelectorAll("*")) {
         if (!ownedBy(el, root)) continue;
@@ -3473,6 +3670,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       el._prontoHasHatches = Boolean(root.matches?.("[data-hatch]") || root.querySelector("[data-hatch]") !== null);
       el._prontoHasNested = root.querySelector("[data-live]") !== null;
       el._prontoHasKeys = Boolean(root.matches?.("[data-key]") || root.querySelector("[data-key]") !== null);
+      el._prontoPlan = bindingPlan(root);
       const when = el.getAttribute("data-when");
       if (when === null) return { el, admits: null };
       // A data-when is matched against the row itself, so its values are
@@ -3602,6 +3800,26 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       },
       row: undefined,
     };
+    // A row's ctx, one per row on show. A class, not a literal: the literal's
+    // locale accessor leaves every row's object in dictionary mode, which at
+    // ten thousand rows is the largest thing the region holds.
+    class RowCtx {
+      constructor(row, chain) {
+        this.params = ctx.params;
+        this.inert = ctx.inert;
+        this.messages = ctx.messages;
+        this.i18n = ctx.i18n;
+        this.cfg = ctx.cfg;
+        this.timeZone = ctx.timeZone;
+        this.adapters = ctx.adapters;
+        this.table = table;
+        this.row = row;
+        this.chain = chain;
+      }
+      get locale() {
+        return ctx.locale ?? currentLocale;
+      }
+    }
     // A named template may reference itself, so nesting depth is data-driven
     // and its floor is a leaf whose child read returns no rows. Cyclic data
     // removes the floor: the same (template, row) pair hydrating inside itself
@@ -3758,7 +3976,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // exactly as a filter moves with its value, and the store keys a maintained
     // view on the whole read — so an order left out of this comparison is a
     // sortable header that writes its column and never re-reads.
+    const NO_NESTED = new Map();
     const syncNested = (entry, ready) => {
+      if (entry.nested === NO_NESTED) entry.nested = new Map();
       const present = nestedOf(entry.node);
       // One a newer template took out stops with it.
       for (const [el, held] of entry.nested) {
@@ -3866,6 +4086,13 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       if (!node) {
         node = tmpl.content.firstElementChild.cloneNode(true);
         node.dataset.id = entry.ctx.row.id;
+        // A fresh clone is its template's markup exactly, so the template's
+        // plan finds its bindings (bindingPlan). Not an id that itself reads
+        // as a placeholder: the walk would bind data-id, and the plan has no
+        // way to know it.
+        if (tmpl._prontoPlan !== undefined && !PLACEHOLDER.test(node.dataset.id)) {
+          node._prontoPlanned = planned(tmpl._prontoPlan, node);
+        }
       }
       if (tmpl._prontoHasForms) {
         for (const form of formsIn(node)) {
@@ -3954,22 +4181,10 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             if (arrived) {
               const tmpl = templateFor(row);
               entry = {
-                ctx: {
-                  params: ctx.params,
-                  inert: ctx.inert,
-                  messages: ctx.messages,
-                  i18n: ctx.i18n,
-                  cfg: ctx.cfg,
-                  timeZone: ctx.timeZone,
-                  adapters: ctx.adapters,
-                  table,
-                  get locale() {
-                    return ctx.locale ?? currentLocale;
-                  },
-                  row,
-                  chain: chainInto(tmpl, row),
-                },
-                nested: new Map(),
+                ctx: new RowCtx(row, chainInto(tmpl, row)),
+                // Shared and empty until syncNested holds a region for it:
+                // most rows nest nothing.
+                nested: NO_NESTED,
               };
               stamp(entry, tmpl);
               live.set(key, entry);
@@ -4010,8 +4225,16 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
               // would stick on the literal "undefined" and never clear.
               if (row.$synced === false) entry.node.dataset.pending = "true";
               else if (entry.node.hasAttribute("data-pending")) delete entry.node.dataset.pending;
-              bindAttributes(entry.node, entry.ctx);
-              bindTexts(entry.node, entry.ctx, renderers);
+              // A node's first bind follows its template's plan; any later
+              // one walks, since by then the row's markup is its own.
+              const plan = entry.node._prontoPlanned;
+              if (plan?.unbound) {
+                plan.unbound = false;
+                bindPlanned(entry.node, plan, entry.ctx, renderers);
+              } else {
+                bindAttributes(entry.node, entry.ctx);
+                bindTexts(entry.node, entry.ctx, renderers);
+              }
               if (entry.tmpl._prontoHasHatches) bindHatches(entry.node, entry.ctx);
               if (entry.tmpl._prontoHasNested || entry.nested.size > 0) toSync.push(entry);
               if (!entry.wired) fresh.push(entry);
@@ -4057,15 +4280,46 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
                 child.remove();
               }
             }
-            let cursor = region.firstElementChild;
-            for (const node of order) {
-              while (cursor && cursor.dataset?.exit !== undefined) cursor = cursor.nextElementSibling;
-              if (cursor === node) {
-                cursor = cursor.nextElementSibling;
-                continue;
+            // Rows already in place at either end are left alone. Of the rest,
+            // the longest run already in order stays, and every other row
+            // moves.
+            const skipExits = (child, step) => {
+              while (child && child.dataset?.exit !== undefined) child = child[step];
+              return child;
+            };
+            let start = 0;
+            let head = skipExits(region.firstElementChild, "nextElementSibling");
+            while (start < order.length && head === order[start]) {
+              start += 1;
+              head = skipExits(head.nextElementSibling, "nextElementSibling");
+            }
+            let end = order.length;
+            let tail = skipExits(region.lastElementChild, "previousElementSibling");
+            while (end > start && tail === order[end - 1]) {
+              end -= 1;
+              tail = skipExits(tail.previousElementSibling, "previousElementSibling");
+            }
+            const middle = order.slice(start, end);
+            const at = new Map();
+            let index = 0;
+            for (let child = head; child && child !== order[end]; child = child.nextElementSibling) {
+              if (child.dataset?.exit === undefined) at.set(child, index++);
+            }
+            const steady = steadyNodes(middle, at);
+            // In order, each before the next row that stays, so rows arriving
+            // into an empty list are appended as they come.
+            const after = order[end] ?? null;
+            let stays = 0;
+            for (let k = 0; k < middle.length; k++) {
+              const node = middle[k];
+              if (steady.has(node)) continue;
+              if (stays <= k) {
+                stays = k + 1;
+                while (stays < middle.length && !steady.has(middle[stays])) stays += 1;
               }
-              if (HAS_MOVE_BEFORE && node.isConnected) region.moveBefore(node, cursor);
-              else region.insertBefore(node, cursor);
+              const next = stays < middle.length ? middle[stays] : after;
+              if (HAS_MOVE_BEFORE && node.isConnected) region.moveBefore(node, next);
+              else region.insertBefore(node, next);
             }
             emptyNote(region, order.length === 0 ? region.dataset.empty : undefined, ctx, templates[0]?.el);
             const select = region.closest("select");
@@ -4074,6 +4328,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
               if (select.value === select._prontoBound) select._prontoBound = undefined;
             }
             fromEnclosing(() => bindElementAttributes(region, ctx), table, "own element");
+            answerSettles();
           };
           const wireListNodes = () => {
             wireKeysOn(region);
@@ -4423,6 +4678,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
           const item = tmpl.content.firstElementChild;
           const node = entry.node;
           morphTree(node, item.cloneNode(true), { slots: false });
+          // The node is the newer item's shape now, which the plan it was
+          // stamped with does not describe.
+          node._prontoPlanned = undefined;
           const pairs = new Map();
           adoptTree(item, node, { rows: true, live: true, pairs });
           entry.tmpl = tmpl;

@@ -42,21 +42,35 @@ const HEADERS = { "Content-Type": "application/json" };
  * four milliseconds, and a region wakes once per write — so every write past
  * the first few pays the clamp, most of what clearing a thousand rows costs.
  * A posted message is a task with no such floor.
+ *
+ * And the next frame, whichever comes first. After a click, Chrome renders
+ * before it runs the tasks the click posted, so a wake that waits for its
+ * message paints one frame late; an animation frame callback runs before that
+ * frame's paint. Both come after the current task and its microtasks, so a
+ * fold's awaited writes still land first. A hidden tab gets no frames, and
+ * there the message wakes it.
  */
 const later = (fn) => {
   // A channel per wake, closed as it fires: an open port is a resource a
   // runtime keeps alive, and a wake owns nothing once it has run.
   const channel = new MessageChannel();
-  channel.port1.onmessage = () => {
+  let frame;
+  let done = false;
+  const cancel = () => {
+    done = true;
     channel.port1.close();
     channel.port2.close();
+    if (frame !== undefined) globalThis.cancelAnimationFrame?.(frame);
+  };
+  const run = () => {
+    if (done) return;
+    cancel();
     fn();
   };
+  channel.port1.onmessage = run;
   channel.port2.postMessage(null);
-  return () => {
-    channel.port1.close();
-    channel.port2.close();
-  };
+  if (typeof globalThis.requestAnimationFrame === "function") frame = globalThis.requestAnimationFrame(run);
+  return cancel;
 };
 
 function token() {
@@ -586,6 +600,9 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     }
     return p;
   }
+  // A table no validation names has nothing to judge, and asking per row is an
+  // await and a predicate sort per row of a bulk write.
+  const judged = (table) => Object.keys(validations[table] ?? {}).length > 0;
 
   // The store seat: every validation of the table judges the row the write
   // would produce (validate.js), over the reader's own copy of the rows its
@@ -2035,7 +2052,7 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     // the collection holds as a number is still that number when patched.
     const byKey = new Map(collection.toArray.map((r) => [String(r[key]), r]));
     const edgeIndex = new Map();
-    for (const row of rows) {
+    if (judged(table)) for (const row of rows) {
       const have = byKey.get(String(row[key]));
       if (have === undefined) await validate(table, "insert", blank(table, row), undefined, edgeIndex);
       else await validate(table, "update", row, have, edgeIndex);
@@ -2079,7 +2096,7 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     const key = keyOf(table);
     const filled = rows.map((r) => blank(table, r));
     const edgeIndex = new Map();
-    for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
+    if (judged(table)) for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
     if (requestOnly(table)) return serverCommand(table, "POST", filled);
     await settle(
       onSettled(client.insert(table, filled), table, filled.map((r) => String(r[key]))),
