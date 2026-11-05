@@ -3803,6 +3803,26 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       },
       row: undefined,
     };
+    // A row's ctx, one per row on show. A class, not a literal: the literal's
+    // locale accessor leaves every row's object in dictionary mode, which at
+    // ten thousand rows is the largest thing the region holds.
+    class RowCtx {
+      constructor(row, chain) {
+        this.params = ctx.params;
+        this.inert = ctx.inert;
+        this.messages = ctx.messages;
+        this.i18n = ctx.i18n;
+        this.cfg = ctx.cfg;
+        this.timeZone = ctx.timeZone;
+        this.adapters = ctx.adapters;
+        this.table = table;
+        this.row = row;
+        this.chain = chain;
+      }
+      get locale() {
+        return ctx.locale ?? currentLocale;
+      }
+    }
     // A named template may reference itself, so nesting depth is data-driven
     // and its floor is a leaf whose child read returns no rows. Cyclic data
     // removes the floor: the same (template, row) pair hydrating inside itself
@@ -3959,7 +3979,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // exactly as a filter moves with its value, and the store keys a maintained
     // view on the whole read — so an order left out of this comparison is a
     // sortable header that writes its column and never re-reads.
+    const NO_NESTED = new Map();
     const syncNested = (entry, ready) => {
+      if (entry.nested === NO_NESTED) entry.nested = new Map();
       const present = nestedOf(entry.node);
       // One a newer template took out stops with it.
       for (const [el, held] of entry.nested) {
@@ -4143,22 +4165,10 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             if (arrived) {
               const tmpl = templateFor(row);
               entry = {
-                ctx: {
-                  params: ctx.params,
-                  inert: ctx.inert,
-                  messages: ctx.messages,
-                  i18n: ctx.i18n,
-                  cfg: ctx.cfg,
-                  timeZone: ctx.timeZone,
-                  adapters: ctx.adapters,
-                  table,
-                  get locale() {
-                    return ctx.locale ?? currentLocale;
-                  },
-                  row,
-                  chain: chainInto(tmpl, row),
-                },
-                nested: new Map(),
+                ctx: new RowCtx(row, chainInto(tmpl, row)),
+                // Shared and empty until syncNested holds a region for it:
+                // most rows nest nothing.
+                nested: NO_NESTED,
               };
               stamp(entry, tmpl);
               live.set(key, entry);
