@@ -416,7 +416,7 @@ describe("the server terminal's guest", () => {
   })
 
   it("is minted again, with growing pauses, while the door refuses a mint", async () => {
-    // A refused mint (Cloud Run's 401 while an IAM change lands) exited the
+    // A refused mint (a 401 while the door's access changes) exited the
     // renderer, the one instance of its service, and every document request
     // was answered 429 until a new one started.
     const now = Math.floor(Date.now() / 1000)
