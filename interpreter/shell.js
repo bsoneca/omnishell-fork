@@ -17,7 +17,7 @@ import { parseMarkup } from "./markup.js";
 // service exists to sign against.
 
 import { chromeText, describe, drawStrip, guestBox, hasStrip, localizeStrip, offersGuest, providerHref, providerKey, stripRoutes, supportsPasskeys } from "./chrome.js";
-import { localeAt, localeTable, ProgramError, routeAt, routeHref, screenEnv, Unanswered } from "./fragment.js";
+import { localeAt, localeTable, opensToVisitors, ProgramError, routeAt, routeHref, screenEnv, Unanswered } from "./fragment.js";
 import { activateScreenStyle, fetchText, interpretScreen, prefetchScreen, templateHash, submitsOnChange, AssetMissing } from "./screen.js";
 import { compileCatalog } from "./vendor/messages.js";
 import { planRelease } from "./release-plan.js";
@@ -754,9 +754,23 @@ export async function createShell({ config, mount, preload = true }) {
       if (stored && !(await accountLives(JSON.parse(stored)))) {
         forgetSession();
       }
+      // A screen the app opens to visitors (its route's access is "public")
+      // is shown to whoever arrives, with no sign-in: a visitor gets a guest
+      // session, minted silently, marked `open` so it stays on such screens.
+      // Anywhere else that session is no sign-in at all, so it is forgotten
+      // and the login gate stands, as for no session (walledFor below keeps
+      // a navigation away from an open screen a document load, which lands
+      // here).
+      const at = addresses(new URL(location.href));
+      const opened = opensToVisitors(cfg, at);
+      const kept = sessionStorage.getItem("pronto-token");
+      if (kept && JSON.parse(kept).open === true && !opened) forgetSession();
       const live = sessionStorage.getItem("pronto-token");
       if (live) {
         session = JSON.parse(live);
+      } else if (opened) {
+        session = { ...(await mintGuest(cfg, served !== null)), open: true };
+        sessionStorage.setItem("pronto-token", JSON.stringify(session));
       } else {
         const gate = localeAt(cfg, location.pathname || "/", location.search ?? "", globalThis.navigator?.languages);
         await Promise.all([catalogued, ensureMessages(gate.locale)]);
@@ -1166,8 +1180,14 @@ export async function createShell({ config, mount, preload = true }) {
     // composed, mounted already. Through the platform's stack where there is
     // one, so a push and a traverse stay distinguishable; by hand where there
     // is not.
+    // A visitor's open session (above) reaches only the screens open to
+    // visitors: a move anywhere else loads the document, whose boot asks
+    // them to sign in.
+    const walledFor = (url) => session?.open === true && !opensToVisitors(cfg, addresses(url));
     const navigate = (href) =>
-      "navigation" in globalThis
+      walledFor(new URL(href, location.href))
+        ? location.assign(href)
+        : "navigation" in globalThis
         ? navigation.navigate(href)
         : (history.pushState(null, "", href), show("push"));
     // The entry document's <base> locates shell assets. A section fragment
@@ -1204,7 +1224,7 @@ export async function createShell({ config, mount, preload = true }) {
         // path this app has no route for belongs to the server.
         if (url.origin !== location.origin) return;
         if (url.pathname === location.pathname && url.search === (location.search ?? "")) return;
-        if (addresses(url) === null) return;
+        if (addresses(url) === null || walledFor(url)) return;
         e.intercept({scroll: "manual", handler: () => show(e.navigationType)});
       });
     } else {
@@ -1215,7 +1235,7 @@ export async function createShell({ config, mount, preload = true }) {
         const href = a.getAttribute("href");
         if (href.startsWith("#")) return;
         const url = new URL(href, location.href);
-        if (url.origin !== location.origin || addresses(url) === null) return;
+        if (url.origin !== location.origin || addresses(url) === null || walledFor(url)) return;
         if (url.pathname === location.pathname && url.search === (location.search ?? "")) return;
         e.preventDefault();
         navigate(url.pathname + url.search);
