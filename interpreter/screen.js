@@ -2454,7 +2454,8 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         setState(err?.name === "NonRetriableError" ? "validation-error" : "network-error");
       };
       const began = performance.now();
-      track((async () => {
+      let job;
+      job = track((async () => {
         try {
           // A form's create mints the key the store now requires of every write:
           // retries are only idempotent because the key travels with each attempt.
@@ -2481,7 +2482,16 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
           // Only while this submit is the store's one write in flight, and only
           // when the store answered promptly — a synced table answers when the
           // server does, long after the frame.
-          if (inFlight.get(store) === 1 && performance.now() - began <= PROMPT_FOLD_MS) store.flushNotifications?.();
+          //
+          // And, as a handler's, not before the submit has reached every
+          // listener it has (afterDispatch): a machine above the form that
+          // also reads the submit has yet to write. By then this submit may
+          // itself be over, so its own share of the count is read from work.
+          const folded = performance.now() - began;
+          afterDispatch(e, () => {
+            const mine = job === undefined || work.has(job) ? 1 : 0;
+            if (inFlight.get(store) === mine && folded <= PROMPT_FOLD_MS) store.flushNotifications?.();
+          });
           dirty.add(entity);
           // Only a create is reset, ready for the next row. Any other form's
           // controls already show the row the write stated, and a reset would put
