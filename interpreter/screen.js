@@ -401,12 +401,12 @@ async function loadRole(screen, appBase, route, attr, role, listed = "handlers",
 // check is that the name is an event and that the handler is declared. The
 // value is a REFERENCE and never a body, which is what keeps the assembly
 // lintable and the reduce pure — an inline on<event> would be neither.
+// By name, not through el.attributes: reading that list makes an Attr and a
+// NamedNodeMap per element, which every stamped row would then hold.
 const onAttrs = (el) => {
   const out = [];
-  const attrs = el.attributes;
-  for (let i = 0; i < attrs.length; i++) {
-    const a = attrs[i];
-    if (a.name.startsWith("data-on-")) out.push({ event: a.name.slice("data-on-".length), name: a.value });
+  for (const name of el.getAttributeNames()) {
+    if (name.startsWith("data-on-")) out.push({ event: name.slice("data-on-".length), name: el.getAttribute(name) });
   }
   return out;
 };
@@ -1504,10 +1504,8 @@ function bindAttributes(scope, ctx) {
 
 /** Whether any of the element's own attributes is a binding. */
 function hasBoundAttribute(el) {
-  const attrs = el.attributes ?? [];
-  for (let i = 0; i < attrs.length; i++) {
-    const a = attrs[i];
-    if (!regionAttr(a.name) && PLACEHOLDER.test(a.value)) return true;
+  for (const name of el.getAttributeNames?.() ?? []) {
+    if (!regionAttr(name) && PLACEHOLDER.test(el.getAttribute(name))) return true;
   }
   return false;
 }
@@ -1598,7 +1596,6 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // setAttribute would consume the placeholder template; persistent regions
   // (singletons) re-bind on every refresh, so originals are stashed.
   let stash = el._prontoAttrs;
-  const attrs = el.attributes ?? [];
   if (stash === undefined) {
     if (!hasBoundAttribute(el)) return;
     stash = el._prontoAttrs = {};
@@ -1608,7 +1605,7 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // an empty boolean is absent, an empty href is not a URL — and iterating
   // only what is present would never visit it again, leaving it dead at the
   // first empty value it ever took.
-  const names = new Set([...attrs].map((a) => a.name));
+  const names = new Set(el.getAttributeNames?.() ?? []);
   for (const name of Object.keys(stash)) names.add(name);
   for (const name of names) {
     if (regionAttr(name)) continue;
@@ -2456,7 +2453,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         form.querySelector(".store-error")?.removeAttribute("hidden");
         setState(err?.name === "NonRetriableError" ? "validation-error" : "network-error");
       };
-      track((async () => {
+      const began = performance.now();
+      let job;
+      job = track((async () => {
         try {
           // A form's create mints the key the store now requires of every write:
           // retries are only idempotent because the key travels with each attempt.
@@ -2477,6 +2476,22 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             await store.dropWhere(entity, interpolateFilter(form.dataset.filter, wiring().getCtx()), refused);
           } else if (action === "delete") await store.drop(entity, [wiring().rowId()], refused);
           else throw new Error(`unknown action: ${action}`);
+          // The write has landed, so its regions are woken in the submit's own
+          // task, as a handler's fold's are (wireEvents): a wake left to the
+          // store's turn runs inside the next frame and the paint waits on it.
+          // Only while this submit is the store's one write in flight, and only
+          // when the store answered promptly — a synced table answers when the
+          // server does, long after the frame.
+          //
+          // And, as a handler's, not before the submit has reached every
+          // listener it has (afterDispatch): a machine above the form that
+          // also reads the submit has yet to write. By then this submit may
+          // itself be over, so its own share of the count is read from work.
+          const folded = performance.now() - began;
+          afterDispatch(e, () => {
+            const mine = job === undefined || work.has(job) ? 1 : 0;
+            if (inFlight.get(store) === mine && folded <= PROMPT_FOLD_MS) store.flushNotifications?.();
+          });
           dirty.add(entity);
           // Only a create is reset, ready for the next row. Any other form's
           // controls already show the row the write stated, and a reset would put
@@ -3828,6 +3843,26 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       },
       row: undefined,
     };
+    // A row's ctx, one per row on show. A class, not a literal: the literal's
+    // locale accessor leaves every row's object in dictionary mode, which at
+    // ten thousand rows is the largest thing the region holds.
+    class RowCtx {
+      constructor(row, chain) {
+        this.params = ctx.params;
+        this.inert = ctx.inert;
+        this.messages = ctx.messages;
+        this.i18n = ctx.i18n;
+        this.cfg = ctx.cfg;
+        this.timeZone = ctx.timeZone;
+        this.adapters = ctx.adapters;
+        this.table = table;
+        this.row = row;
+        this.chain = chain;
+      }
+      get locale() {
+        return ctx.locale ?? currentLocale;
+      }
+    }
     // A named template may reference itself, so nesting depth is data-driven
     // and its floor is a leaf whose child read returns no rows. Cyclic data
     // removes the floor: the same (template, row) pair hydrating inside itself
@@ -3984,7 +4019,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // exactly as a filter moves with its value, and the store keys a maintained
     // view on the whole read — so an order left out of this comparison is a
     // sortable header that writes its column and never re-reads.
+    const NO_NESTED = new Map();
     const syncNested = (entry, ready) => {
+      if (entry.nested === NO_NESTED) entry.nested = new Map();
       const present = nestedOf(entry.node);
       // One a newer template took out stops with it.
       for (const [el, held] of entry.nested) {
@@ -4168,22 +4205,10 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             if (arrived) {
               const tmpl = templateFor(row);
               entry = {
-                ctx: {
-                  params: ctx.params,
-                  inert: ctx.inert,
-                  messages: ctx.messages,
-                  i18n: ctx.i18n,
-                  cfg: ctx.cfg,
-                  timeZone: ctx.timeZone,
-                  adapters: ctx.adapters,
-                  table,
-                  get locale() {
-                    return ctx.locale ?? currentLocale;
-                  },
-                  row,
-                  chain: chainInto(tmpl, row),
-                },
-                nested: new Map(),
+                ctx: new RowCtx(row, chainInto(tmpl, row)),
+                // Shared and empty until syncNested holds a region for it:
+                // most rows nest nothing.
+                nested: NO_NESTED,
               };
               stamp(entry, tmpl);
               live.set(key, entry);
