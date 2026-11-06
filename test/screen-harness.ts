@@ -133,6 +133,9 @@ export type Cluster = {
     { scope: string; owner?: string; parent?: string; on?: string; shared?: { via: string; on: string; user: string } }
   >;
   me?: string;
+  /** The carrier table the shell is served with (shell.yaml `carriers`):
+   * what the shipped client judges each written value's type by. */
+  carriers?: unknown;
   /** Column DEFAULTs the database fills and the browser never computes, per
    * table. The shipped store has the same hole transiently — it writes the
    * submitted values optimistically and learns the rest when the server row
@@ -920,10 +923,11 @@ export async function appCluster(appDir: URL): Promise<Cluster> {
     access?: Cluster["access"];
     keys?: Record<string, string>;
     schema?: Schema;
+    carriers?: unknown;
   };
   const owners: Record<string, string> = {};
   for (const [table, a] of Object.entries(shell.access ?? {})) {
     if (a.owner !== undefined) owners[table] = a.owner;
   }
-  return { uniques: shell.uniques, owners, keys: shell.keys, access: shell.access, schema: shell.schema };
+  return { uniques: shell.uniques, owners, keys: shell.keys, access: shell.access, schema: shell.schema, carriers: shell.carriers };
 }
