@@ -1784,7 +1784,7 @@ const PROMPT_FOLD_MS = 4;
 // its dispatch, or the host dispatches synchronously and has no phase to
 // report), wakes at once.
 function afterDispatch(e, wake) {
-  if (e?.eventPhase > 0 && typeof globalThis.addEventListener === "function") {
+  if (e?.bubbles && e.eventPhase > 0 && typeof globalThis.addEventListener === "function") {
     globalThis.addEventListener(e.type, (done) => {
       if (done === e) wake();
     }, { once: true });
