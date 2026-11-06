@@ -1774,6 +1774,25 @@ function staticOrParam(template, ctx) {
 // the next key or click behind it; in a task of its own the input goes first.
 const PROMPT_FOLD_MS = 4;
 
+// Runs `wake` once the event `e` has reached every listener it has. A fold that
+// asks for its wake in the event's own task must not ask before then: Chrome
+// runs a microtask checkpoint between a real event's listeners, so a fold that
+// ends inside the first listener's turn would wake the screen before the next
+// listener — a machine on a region above, say — has written its half. The wake
+// is made at the window, the last stop of a bubbling event, and only for this
+// event; an event that does not bubble, or is already over (the fold outlived
+// its dispatch, or the host dispatches synchronously and has no phase to
+// report), wakes at once.
+function afterDispatch(e, wake) {
+  if (e?.eventPhase > 0 && typeof globalThis.addEventListener === "function") {
+    globalThis.addEventListener(e.type, (done) => {
+      if (done === e) wake();
+    }, { once: true });
+  } else {
+    wake();
+  }
+}
+
 // Work in flight, by store, across every screen it serves: a document's slots
 // share one store, and a flush of its wakes reaches all of their regions.
 const inFlight = new WeakMap();
@@ -2876,7 +2895,21 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             // fold is half applied, and its wake is left to the store's own
             // turn. A fold that took long writing has a long pass to come,
             // and it too is left to the store's turn (PROMPT_FOLD_MS).
-            if (inFlight.get(store) === 0 && performance.now() - began <= PROMPT_FOLD_MS) store.flushNotifications?.();
+            //
+            // And not before the event has reached every listener it has. A
+            // press on a card is this handler's and, one level up, the table
+            // machine's: the machine's own fold has yet to write. Chrome runs
+            // a microtask checkpoint between a real event's listeners, so this
+            // fold can finish, and its flush wake the screen, before the next
+            // listener has run — and a reduce woken between the two reads the
+            // half of the press that has landed (a card held, a machine still
+            // idle) and takes it for a press let go. The flush waits for the
+            // event to finish dispatching, where the machine's fold is in
+            // flight and the wake is left to the store's turn, as it was.
+            const folded = performance.now() - began;
+            afterDispatch(e, () => {
+              if (inFlight.get(store) === 0 && folded <= PROMPT_FOLD_MS) store.flushNotifications?.();
+            });
           } catch (err) {
             console.error(err);
             setState("network-error");
