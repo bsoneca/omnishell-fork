@@ -41,7 +41,12 @@ const parse = (html: string) => (parseHTML(html) as unknown as { document: unkno
 export async function renderDocuments(appDir: URL, origin: string): Promise<Map<string, string>> {
   const read = (rel: string) => Deno.readTextFile(new URL(rel, appDir));
   const cfg: Shell = JSON.parse(await read("shell/shell.json"));
-  const entry = await read("shell/index.html");
+  // The entry's first paint (terminal.cue firstPaint) is for the entry alone: a document a reader or a
+  // crawler gets whole carries none of it, nor the policy source its script needed.
+  const entry = (await read("shell/index.html"))
+    .replace(/<(style|script) data-first-paint>[\s\S]*?<\/\1>\n?/g, "")
+    .replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "")
+    .replace(/ 'sha256-[A-Za-z0-9+\/=]+'/, "");
 
   // The interpreter's ambient world, as a browser would hand it one: a screen
   // reads its clock knobs off location at module evaluation, so this is set
