@@ -61,3 +61,13 @@ describe("the shell's own config read", () => {
     expect(shell).not.toContain("new URL(config, location.href)")
   })
 })
+
+describe("the entry document's first paint", () => {
+  it("has its holes ahead of every stylesheet and after #app, so an app that fills none gets the same bytes", () => {
+    // The script runs without waiting for the stylesheets only if it is ahead of them.
+    const head = template.indexOf("{firstpaint_head}")
+    expect(head).toBeGreaterThan(-1)
+    expect(head).toBeLessThan(template.indexOf('rel="stylesheet"'))
+    expect(template).toContain('<main id="app"></main>{firstpaint_body}\n')
+  })
+})
