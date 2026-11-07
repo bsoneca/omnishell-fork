@@ -23,6 +23,13 @@ import { assetURL, preloadScreen } from "./preloads.js";
  * for. */
 export const servesGuests = (cfg) => !cfg.auth?.required && (cfg.tables?.length ?? 0) > 0;
 
+// The entry's first paint (terminal.cue firstPaint) is for the entry alone, a page about to boot: a document a
+// reader, a crawler or a link preview gets whole carries none of it, nor the policy source its script needed.
+export const withoutFirstPaint = (entry) => entry
+  .replace(/<(style|script) data-first-paint>[\s\S]*?<\/\1>\n?/g, "")
+  .replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "")
+  .replace(/ 'sha256-[A-Za-z0-9+\/=]+'/g, "");
+
 /**
  * One document. `rows` says whether the store answers with the world: a
  * document rendered before any request (no rows to be had) is the screen as it
@@ -63,7 +70,7 @@ export async function renderDocument({
   onChunk,
 }) {
   if (typeof origin !== "string") throw new Error("a document's links are absolute, and no origin was given to spell them against");
-  const doc = parse(entry);
+  const doc = parse(withoutFirstPaint(entry));
   const ambient = globalThis.document;
   globalThis.document = doc;
   const decorateDoc = (screen, cas) => {
