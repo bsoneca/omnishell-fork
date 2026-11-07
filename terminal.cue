@@ -449,8 +449,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 			// waiting for them; its sha256 joins the policy's script-src. Free of "</script".
 			script: string
 		}
-		_firstPaintHead: [if firstPaint != _|_ {"<style>\(firstPaint.css)</style>\n<script>\(firstPaint.script)</script>\n"}, ""][0]
-		_firstPaintBody: [if firstPaint != _|_ {"\n\(firstPaint.html)"}, ""][0]
+		_firstPaintHead: [if firstPaint != _|_ {"<style data-first-paint>\(firstPaint.css)</style>\n<script data-first-paint>\(firstPaint.script)</script>\n"}, ""][0]
+		_firstPaintBody: [if firstPaint != _|_ {"\n<!--first-paint-->\(firstPaint.html)<!--/first-paint-->"}, ""][0]
 		machineSchema: #Path
 		machineSchema: *"../../plugins/omnishell/machine.cue" | string
 
