@@ -46,7 +46,7 @@ export async function renderDocuments(appDir: URL, origin: string): Promise<Map<
   const entry = (await read("shell/index.html"))
     .replace(/<(style|script) data-first-paint>[\s\S]*?<\/\1>\n?/g, "")
     .replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "")
-    .replace(/ 'sha256-[A-Za-z0-9+\/=]+'/, "");
+    .replace(/ 'sha256-[A-Za-z0-9+\/=]+'/g, "");
 
   // The interpreter's ambient world, as a browser would hand it one: a screen
   // reads its clock knobs off location at module evaluation, so this is set
