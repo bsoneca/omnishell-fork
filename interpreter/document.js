@@ -28,10 +28,22 @@ export const servesGuests = (cfg) => !cfg.auth?.required && (cfg.tables?.length 
 // An entry a release addressed (server/release-addresses.ts parses it and writes its outerHTML) spells the
 // marker `data-first-paint=""`: both spellings go, or the policy source goes and the script stays, which the
 // browser then refuses (a CSP violation) and which a crawler reads (the script reads the session's token).
-export const withoutFirstPaint = (entry) => entry
-  .replace(/<(style|script) data-first-paint(?:="")?>[\s\S]*?<\/\1>\n?/g, "")
-  .replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "")
-  .replace(/ 'sha256-[A-Za-z0-9+\/=]+'/g, "");
+// Only the policy source of the script it removes goes with it: an addressed entry also holds an import map
+// and a speculation-rules script that the same policy names by hash, and with their hashes gone the browser
+// refuses them (an inline-script CSP violation on every table and profile document, 2026-11-08).
+export const withoutFirstPaint = async (entry) => {
+  const hashes = [];
+  const kept = entry.replace(/<(style|script) data-first-paint(?:="")?>([\s\S]*?)<\/\1>\n?/g, (_, tag, body) => {
+    if (tag === "script") hashes.push(body);
+    return "";
+  }).replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "");
+  let out = kept;
+  for (const body of hashes) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+    out = out.split(` 'sha256-${btoa(String.fromCharCode(...digest))}'`).join("");
+  }
+  return out;
+};
 
 /**
  * One document. `rows` says whether the store answers with the world: a
@@ -73,7 +85,7 @@ export async function renderDocument({
   onChunk,
 }) {
   if (typeof origin !== "string") throw new Error("a document's links are absolute, and no origin was given to spell them against");
-  const doc = parse(withoutFirstPaint(entry));
+  const doc = parse(await withoutFirstPaint(entry));
   const ambient = globalThis.document;
   globalThis.document = doc;
   const decorateDoc = (screen, cas) => {
