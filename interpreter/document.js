@@ -25,8 +25,11 @@ export const servesGuests = (cfg) => !cfg.auth?.required && (cfg.tables?.length 
 
 // The entry's first paint (terminal.cue firstPaint) is for the entry alone, a page about to boot: a document a
 // reader, a crawler or a link preview gets whole carries none of it, nor the policy source its script needed.
+// An entry a release addressed (server/release-addresses.ts parses it and writes its outerHTML) spells the
+// marker `data-first-paint=""`: both spellings go, or the policy source goes and the script stays, which the
+// browser then refuses (a CSP violation) and which a crawler reads (the script reads the session's token).
 export const withoutFirstPaint = (entry) => entry
-  .replace(/<(style|script) data-first-paint>[\s\S]*?<\/\1>\n?/g, "")
+  .replace(/<(style|script) data-first-paint(?:="")?>[\s\S]*?<\/\1>\n?/g, "")
   .replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "")
   .replace(/ 'sha256-[A-Za-z0-9+\/=]+'/g, "");
 
