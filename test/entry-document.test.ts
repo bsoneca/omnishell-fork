@@ -5,6 +5,7 @@
 // noticed: build, lint and every suite passed over a platform on which no
 // JavaScript ran at any route, and only the browser tier said so.
 import { describe, expect, it } from "@test/harness"
+import { withoutFirstPaint } from "../interpreter/document.js"
 
 const template = await Deno.readTextFile(new URL("../shell.html", import.meta.url))
 const shell = await Deno.readTextFile(new URL("../interpreter/shell.js", import.meta.url))
@@ -70,4 +71,21 @@ describe("the entry document's first paint", () => {
     expect(head).toBeLessThan(template.indexOf('rel="stylesheet"'))
     expect(template).toContain('<main id="app"></main>{firstpaint_body}\n')
   })
+})
+
+describe("a document's first paint", () => {
+  const paint = (marker: string) =>
+    `<head><meta http-equiv="Content-Security-Policy" content="script-src 'self' 'sha256-AAAA=' 'unsafe-eval'">` +
+    `<style ${marker}>#fp{}</style>\n<script ${marker}>sessionStorage.getItem('pronto-token')</script></head>` +
+    `<body><main id="app"></main>\n<!--first-paint--><div id="fp"></div><!--/first-paint--></body>`
+  // Both spellings: the entry as the terminal writes it, and as a release's addressing writes it back.
+  for (const marker of ["data-first-paint", 'data-first-paint=""']) {
+    it(`is dropped from an entry that marks it ${marker}, with the policy source of its script`, () => {
+      const out = withoutFirstPaint(paint(marker))
+      expect(out).not.toContain("first-paint")
+      expect(out).not.toContain("pronto-token")
+      expect(out).not.toContain("sha256-")
+      expect(out).toContain('<main id="app"></main>')
+    })
+  }
 })
