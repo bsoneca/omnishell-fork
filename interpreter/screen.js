@@ -1816,6 +1816,24 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
   cleanups.push(hostDom.stop);
   // One seat per data-on-mutation handler, screen-wide (see wireEvents).
   const folds = new Map();
+  // One lane per reduce, screen-wide: a run reads its world, reduces and
+  // writes before the next run of the same reduce reads. Two runs at once
+  // would each conclude from a world missing the other's writes — four quick
+  // taps that each move a piece leave the last one deciding from three stale
+  // pieces — so its events take turns, in the order they fired, whichever
+  // region they fired in. A lane holds only that read-reduce-write: a `then`
+  // with a delay waits outside it, and a refusal is fired, not awaited, so
+  // nothing a run awaits can wait on the run behind it.
+  const lanes = new Map();
+  const inLane = (reduce, run) => {
+    const turn = (lanes.get(reduce) ?? Promise.resolve()).then(run, run);
+    const tail = turn.then(() => {}, () => {});
+    lanes.set(reduce, tail);
+    tail.then(() => {
+      if (lanes.get(reduce) === tail) lanes.delete(reduce);
+    });
+    return turn;
+  };
   const work = new Set();
   const derived = new Map();
   const dirty = new Set();
@@ -2813,7 +2831,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
 
     const step = async (reduce, event, depth, pause) => {
       if (held === "stopped") return;
-      const next = await track((async () => {
+      const next = await track(inLane(reduce, async () => {
         if (held === "stopped") return;
         checkSettlement(region);
         const result = reduce({ items: getRows(), rows: await worldOf() }, event);
@@ -2829,7 +2847,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
           throw new Error(`handler chain did not settle in ${STEPS} steps at "${result.then.type}"`);
         }
         return result?.then;
-      })());
+      }));
       if (!next?.type) return;
       if (next.delay > 0) {
         pause?.();
