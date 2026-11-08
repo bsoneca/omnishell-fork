@@ -74,17 +74,25 @@ describe("the entry document's first paint", () => {
 })
 
 describe("a document's first paint", () => {
-  const paint = (marker: string) =>
-    `<head><meta http-equiv="Content-Security-Policy" content="script-src 'self' 'sha256-AAAA=' 'unsafe-eval'">` +
-    `<style ${marker}>#fp{}</style>\n<script ${marker}>sessionStorage.getItem('pronto-token')</script></head>` +
+  const script = "sessionStorage.getItem('pronto-token')"
+  const importmap = '{"imports":{}}'
+  const sha = async (text: string) =>
+    `'sha256-${btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))))}'`
+  const paint = async (marker: string) =>
+    `<head><meta http-equiv="Content-Security-Policy" content="script-src 'self' ${await sha(importmap)} ${await sha(script)} 'unsafe-eval'">` +
+    `<script id="pronto-assets" type="importmap">${importmap}</script>` +
+    `<style ${marker}>#fp{}</style>\n<script ${marker}>${script}</script></head>` +
     `<body><main id="app"></main>\n<!--first-paint--><div id="fp"></div><!--/first-paint--></body>`
   // Both spellings: the entry as the terminal writes it, and as a release's addressing writes it back.
   for (const marker of ["data-first-paint", 'data-first-paint=""']) {
-    it(`is dropped from an entry that marks it ${marker}, with the policy source of its script`, () => {
-      const out = withoutFirstPaint(paint(marker))
+    it(`is dropped from an entry that marks it ${marker}, with the policy source of its script and no other`, async () => {
+      const out = await withoutFirstPaint(await paint(marker))
       expect(out).not.toContain("first-paint")
       expect(out).not.toContain("pronto-token")
-      expect(out).not.toContain("sha256-")
+      expect(out).not.toContain(await sha(script))
+      // The import map an addressing added is inline too, and its policy source stays: without it the
+      // browser refuses the map on every rendered document.
+      expect(out).toContain(await sha(importmap))
       expect(out).toContain('<main id="app"></main>')
     })
   }
