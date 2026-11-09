@@ -7,8 +7,6 @@ import { referencedChart } from "./row-attachments.js";
 
 import {
   embedDeps,
-  machineCandidates,
-  machineShape,
   parseEmbeds,
   parseFilterSpec,
   parseLimit,
@@ -18,6 +16,7 @@ import {
   PLACEHOLDER,
   PLACEHOLDERS,
   routeOf, optionalSegment } from "./fragment.js";
+import { machineCandidates, machineShape } from "./machine-shape.js";
 
 type Unique = { name: string; cols: string[]; where?: string };
 export type Entity = {

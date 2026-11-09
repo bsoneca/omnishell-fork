@@ -56,7 +56,8 @@
 // as an app whose screens say less than they do.
 
 import { machineRegions, resolveMachineMarkup, scanScreen, screenAccess, type ScreenRead, type ScreenWrite } from "./interpreter/lint.ts";
-import { machineShape, parseFilterSpec } from "./interpreter/fragment.js";
+import { parseFilterSpec } from "./interpreter/fragment.js";
+import { machineShape } from "./interpreter/machine-shape.js";
 
 /** A filter as descriptors, or null where the fragment is server-computed. */
 export type Spec = { col: string; op: string; value?: string }[] | null;

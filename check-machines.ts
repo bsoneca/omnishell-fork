@@ -30,7 +30,8 @@
 import { machineRegions, resolveMachineMarkup, paramPlans } from "./interpreter/lint.ts";
 
 import { optionalSegment } from "./interpreter/fragment.js";
-import { ABSENT, binding, fillFilter, machineShape, PLACEHOLDER, PLACEHOLDERS } from "./interpreter/fragment.js";
+import { ABSENT, binding, fillFilter, PLACEHOLDER, PLACEHOLDERS } from "./interpreter/fragment.js";
+import { machineShape } from "./interpreter/machine-shape.js";
 import { seedQuery, selectWithFields } from "./test/seed-query.ts";
 import { walkMachine, type WalkHarness } from "./test/walker.ts";
 import type { Machine } from "./test/canonical.ts";

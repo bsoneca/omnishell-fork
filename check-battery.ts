@@ -48,9 +48,9 @@
 import fc from "npm:fast-check@3.23.2";
 import { sharedInputs, type PropertyFor } from "./battery-inputs.ts";
 import { load as parseYaml } from "./interpreter/vendor/js-yaml.js";
-import { buildEndowments, ensureSes, evaluateCaged, SAFE_ENDOWMENTS } from "./interpreter/jessie.js";
+import { buildEndowments, ensureSes, evaluateCaged, loadStatechart, SAFE_ENDOWMENTS } from "./interpreter/jessie.js";
 import { machineRegions, resolveMachineMarkup, scanScreen } from "./interpreter/lint.ts";
-import { machineCandidates, RESERVED_LEAVES } from "./interpreter/fragment.js";
+import { machineCandidates, RESERVED_LEAVES } from "./interpreter/machine-shape.js";
 import {
   arbitraryHandlerInput,
   arbitraryValidationInput,
@@ -259,6 +259,7 @@ export async function exercise(
   try {
     await ensureSes();
     const granted = [...new Set(endowments)];
+    if (granted.includes("Statechart")) await loadStatechart();
     const undeclared = Object.fromEntries(Object.keys(SAFE_ENDOWMENTS).filter((name) => !granted.includes(name)).map((name) => [name, `${role}: ${name} is not endowed; declare it among the module's endowments`]));
     target = await evaluateCaged(instrument(source), { ...buildEndowments(granted), ...meter.endowments }, undeclared) as (...args: unknown[]) => unknown;
   } catch (err) {

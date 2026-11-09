@@ -2,7 +2,13 @@
 // did not write. Nothing here endows ambient authority — an absent global
 // cannot be argued with, which is the only reason app source is safe to run
 // unread.
-import { Statechart } from "./statechart.js";
+// The statechart library carries xstate with it, so only a role that is endowed
+// with Statechart loads it (evaluateRole awaits loadStatechart before it builds
+// the endowments). Server startup binds it statically (server/prepare-worker.ts).
+let statechart;
+export function loadStatechart() {
+  return statechart ? undefined : import("./statechart.js").then((module) => { statechart ??= module.Statechart; });
+}
 
 // ses pin: the vendored umd dist (bundle:ses), loaded beside this module —
 // same-origin, so the platform's own image is the integrity boundary. One
@@ -178,7 +184,10 @@ export const SAFE_ENDOWMENTS = {
   TextDecoder: () => TextDecoder,
   URL: () => URL,
   URLSearchParams: () => URLSearchParams,
-  Statechart: () => harden(Statechart),
+  Statechart: () => {
+    if (!statechart) throw new Error("Statechart endowment: call loadStatechart() first");
+    return harden(statechart);
+  },
 };
 
 export function buildEndowments(names = []) {
@@ -310,6 +319,7 @@ export async function evaluateRole(source, role = "handler", requestedEndowments
       n,
       `${role}: ${n} is not endowed; declare it among the module's endowments`,
     ]));
+    if (combined.includes("Statechart")) await loadStatechart();
     value = await evaluateCaged(spec.wrap(source), spec.endow(combined), undeclared);
   } catch (err) {
     // What the compartment is handed is the role's adaptation of the file, not

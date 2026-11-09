@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@test/harness"
 import { machineLint, type Reach } from "../interpreter/lint.ts"
-import { machineShape } from "../interpreter/fragment.js"
+import { machineShape } from "../interpreter/machine-shape.js"
 
 /** Where a chart's writes land, as check-markup hands it over from shell.yaml. */
 const reach = (durabilities: Record<string, string> = {}, table = "row"): Reach => ({ table, durabilityOf: (t) => durabilities[t] })

@@ -2,17 +2,13 @@
 // store. The binding vocabulary is the pronto SPEC's; the shell owns every
 // effect and the whole state machine — screens only style states.
 import { parseMarkup } from "./markup.js";
-import { resolveMachineReferences } from "./row-attachments.js";
-import { renderInto } from "./render.js";
-import { mountHatch, selfSrc } from "./hatch.js";
+import { resolveMachineReferences } from "./machine-references.js";
 import {
   ABSENT,
   binding,
   compareBy,
   directionOf,
   fillFilter,
-  machineCandidates,
-  machineShape,
   parseFilter,
   OrderError,
   parseFilterSpec,
@@ -29,10 +25,30 @@ import {
 } from "./fragment.js";
 import { evaluateRole } from "./jessie.js";
 import { hostDomScreen } from "./host-dom.js";
-import { observeActor } from "./observe-actor.js";
-import { invokedActors } from "./invoked-actors.js";
-import { machineEngine } from "./machine-engine.js";
 import { assetURL, skeletonRoutes } from "./preloads.js";
+// What a screen may mount is loaded when its template says it does, before
+// anything mounts, so an app that has none of a kind never pays for that kind:
+// a machine (its engine, its actors and the statechart library under them), a
+// hatch or kinetic child (the unit seat, its presenter and its worker), or a
+// renderer (the node builder).
+let observeActor, invokedActors, machineEngine, machineCandidates, machineShape;
+let machineKit;
+const ensureMachineKit = () => machineKit ??= Promise.all([import("./observe-actor.js"), import("./invoked-actors.js"), import("./machine-engine.js"), import("./machine-shape.js")]).then(([observe, invoked, engine, shape]) => {
+  observeActor = observe.observeActor;
+  invokedActors = invoked.invokedActors;
+  machineEngine = engine.machineEngine;
+  machineCandidates = shape.machineCandidates;
+  machineShape = shape.machineShape;
+});
+let mountHatch, selfSrc;
+let hatchKit;
+const ensureHatchKit = () => hatchKit ??= import("./hatch.js").then((hatch) => {
+  mountHatch = hatch.mountHatch;
+  selfSrc = hatch.selfSrc;
+});
+let renderInto;
+let renderKit;
+const ensureRenderKit = () => renderKit ??= import("./render.js").then((render) => { renderInto = render.renderInto; });
 
 export class AssetMissing extends Error {
   constructor(url, status = 404) {
@@ -583,6 +599,7 @@ async function loadRenderers(screen, appBase, route, endowmentsMap = {}) {
       entries.push(loadModule(appBase, path, "renderer", endowmentsMap).then((m) => [name, m]));
     }
   }
+  if (entries.length) await ensureRenderKit();
   return Object.fromEntries(await Promise.all(entries));
 }
 
@@ -2177,6 +2194,8 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     localize(screen);
   };
 
+  if (html.includes("data-machine")) await ensureMachineKit();
+  if (/data-(?:hatch|kinetic)/.test(html)) await ensureHatchKit();
   const markup = prepare(html);
   const cas = templateHash(html);
   let links = skeletonRoutes(html);
@@ -5048,6 +5067,8 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
   // (retemplate). A region it adds, or whose read it changes, is hydrated
   // where it stands, as the mount would have, and one it drops is stopped.
   const morph = async (newHtml) => {
+    if (newHtml.includes("data-machine")) await ensureMachineKit();
+    if (/data-(?:hatch|kinetic)/.test(newHtml)) await ensureHatchKit();
     const next = prepare(newHtml);
     // Everything the mount refuses or loads before anything hydrates, before
     // the running screen or anything it reads by name is touched: a template
