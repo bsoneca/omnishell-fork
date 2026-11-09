@@ -1638,6 +1638,8 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
   // keep their poll keys hot — stop them before mounting the next one.
   for (const stop of mount._prontoStops ?? []) stop();
   const cleanups = [];
+  // Submits made before their form was wired, by form, with the button that made each.
+  const heldSubmits = new Map();
   mount._prontoStops = cleanups;
   cleanups.push(hostDom.stop);
   // One seat per data-on-mutation handler, screen-wide (see wireEvents).
@@ -1849,6 +1851,22 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // The words are this catalogue's, whichever the document was drawn with.
     localize(screen);
   }
+
+  // The screen is on the page from here, but its forms are wired only once the
+  // modules below have loaded, and a region's as it hydrates. A form submitted
+  // before that is the browser's: a navigation to the form's own address with
+  // its fields in the query, which reloads the page and loses the write (a
+  // Join pressed while a slow host still loaded the screen's handlers). Such a
+  // submit is held instead, and wireForm makes it once the form is the shell's.
+  const holdUnwired = (e) => {
+    const form = e.target;
+    if (form?.tagName !== "FORM" || form._prontoForm || !form.matches("form[data-action]")) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    heldSubmits.set(form, e.submitter ?? null);
+  };
+  screen.addEventListener("submit", holdUnwired, true);
+  cleanups.push(() => screen.removeEventListener("submit", holdUnwired, true));
 
   // Keyed by the module's app-relative path, the one spelling every loader
   // and pronto's lint read.
@@ -2327,6 +2345,15 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     form.addEventListener("change", () => {
       if (submitsOnChange(form)) form.requestSubmit();
     });
+    // A submit the reader made before this form was wired (heldSubmits) is
+    // its first, made now that the form is the shell's.
+    if (heldSubmits.has(form)) {
+      const submitter = heldSubmits.get(form);
+      heldSubmits.delete(form);
+      queueMicrotask(() => {
+        if (form.isConnected) form.requestSubmit(submitter?.isConnected && submitter.form === form ? submitter : undefined);
+      });
+    }
   }
 
   // Stage-4's only handler event source: DOM drags become {type:"move",
