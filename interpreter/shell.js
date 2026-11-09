@@ -24,8 +24,6 @@ import { compileCatalog } from "./vendor/messages.js";
 import { filesMoved, planRelease } from "./release-plan.js";
 import { replayEarlyGestures, takeEarlyGestures } from "./early-replay.js";
 import { navFeedback } from "./nav-feedback.js";
-import { createRowAttachments } from "./row-attachments.js";
-import { createCortexNavigation } from "./cortex-navigation.js";
 export { routeAt } from "./fragment.js";
 import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
 import { startLinkPrefetch } from "./link-prefetch.js";
@@ -715,7 +713,12 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     const cfg = configUrl.pathname.endsWith(".json")
       ? JSON.parse(text)
       : (await import("./vendor/js-yaml.js")).load(text);
-    const rowAttachments = createRowAttachments(Object.fromEntries(Object.entries(cfg.cortex?.actors ?? {}).filter(([, binding]) => binding.via === "rows")));
+    // Row attachments and cortex navigation (and the statechart library under
+    // them) are paid for by an app that declares a cortex, and by no other.
+    const [{ createRowAttachments }, { createCortexNavigation }] = cfg.cortex === undefined
+      ? [{}, {}]
+      : await Promise.all([import("./row-attachments.js"), import("./cortex-navigation.js")]);
+    const rowAttachments = cfg.cortex === undefined ? undefined : createRowAttachments(Object.fromEntries(Object.entries(cfg.cortex.actors ?? {}).filter(([, binding]) => binding.via === "rows")));
     // A served document's head already says what it is.
     if (served === null) document.title = cfg.app;
 

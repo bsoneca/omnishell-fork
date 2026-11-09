@@ -21,7 +21,7 @@
 // lockdown() never settles; module load happens before any test body runs.
 
 import { createMachine, initialTransition, transition } from "npm:xstate@5.32.6";
-import { machineShape } from "../interpreter/fragment.js";
+import { machineShape } from "../interpreter/machine-shape.js";
 import { canonical, guardNames, type Machine, type StateNode } from "./canonical.ts";
 
 export type Arrow = { state: string; key: string; index: number; to?: string };
