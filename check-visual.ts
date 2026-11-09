@@ -11,6 +11,10 @@
 // host them: there a screen is a 360px frame on a flex board, so every
 // geometry check resolves against the board instead of the screen.
 //
+// SLOW=1 measures every page slowed as the release gate's are (CPU 4 times, 300 ms on
+// every request, 10 Mbit/s; SLOW=<cpu>,<latency ms> names its own): what an app draws
+// after a late answer shifts the layout there, and not on the fast line of a local stack.
+//
 // Findings print as {severity, path, message} JSON (SPEC.md lint format).
 // Only `critical` exits non-zero. Visual lint reports genuine but
 // advisory design findings at major/minor — tap targets below the AAA size,
@@ -32,6 +36,7 @@ import { checkWhiteSpace } from "./src/lint/playwright/checks/whitespace-balance
 import { baseUrl } from "./base-url.ts"
 import { checkContrast, contrastFloor, contrastRatio } from "./src/lint/playwright/checks/contrast.ts"
 import { armCLS, checkCLS } from "./src/lint/playwright/checks/cls.ts"
+import { slowDown, slowness } from "./src/lint/playwright/slow.ts"
 import { captureConsole, analyzeConsole } from "./src/lint/playwright/checks/console-messages.ts"
 import type { VisualBug } from "./src/lint/playwright/types.ts"
 import { type ParamPlan, paramPlans, machineRegions } from "./interpreter/lint.ts"
@@ -48,7 +53,10 @@ type PageLike = {
   close(): Promise<void>
 }
 /** Likewise: the one method a lane calls on a viewport's context. */
-type ContextLike = { newPage(): Promise<PageLike> }
+type ContextLike = {
+  newPage(): Promise<PageLike>
+  newCDPSession(page: PageLike): Promise<{ send(method: string, params?: unknown): Promise<unknown> }>
+}
 type Route = { path: string; files?: { html?: string } }
 
 export type Viewport = { name: string; width: number; height: number }
@@ -754,6 +762,10 @@ async function main(appDir: string, viewports: Viewport[] = DEFAULT_VIEWPORTS): 
     let console_: ReturnType<typeof captureConsole>
     try {
       page = await context.newPage()
+      // SLOW=1 (src/lint/playwright/slow.ts): the page is as slow as the release gate's, from
+      // before its first request, so what a late answer draws after the screen is up shifts it
+      // here as it does there.
+      if (slowness()[0]) await slowDown(await context.newCDPSession(page))
       // Armed before navigation: the leak this hunts is transient by nature —
       // a binding's brace text painted during the hydration window — so the
       // sampler must be watching from the first frame. innerText is the

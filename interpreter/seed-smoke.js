@@ -122,3 +122,17 @@ Deno.test({
     });
   },
 });
+
+Deno.test({
+  name: "a seed named by a file is fetched on the first read and read like rows written inline",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    await withBrowser({}, async (createStore) => {
+      const href = `data:application/json,${encodeURIComponent(JSON.stringify(PALETTE.seed))}`;
+      const store = await createStore("", { carriers: FIXTURE_CARRIERS, local: PALETTE.local, seed: { command: { href } } });
+      const rows = await store.query("command", "position.asc", {});
+      assert(rows.map((r) => r.label).join("|") === "New note|Search|Sign out", `the file's rows: ${JSON.stringify(rows)}`);
+    });
+  },
+});
