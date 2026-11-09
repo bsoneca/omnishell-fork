@@ -205,7 +205,7 @@ const CONFLICT_SENDS = 5;
 const CONFLICT_FIRST_MS = 25;
 const reloading = new Set();
 
-async function send(url, init) {
+async function send(url, init, retried = false) {
   if (init?.signal?.aborted) {
     throw init.signal.reason ?? new DOMException("aborted", "AbortError");
   }
@@ -232,9 +232,19 @@ async function send(url, init) {
   ) {
     // Expired/invalid token: re-gate through the login screen. The reload
     // tears the page down, so this promise never settles while the store is
-    // open. The server terminal's reload is its end (server/render.ts inhabit).
+    // open. The server terminal's reload instead returns the guest it mints
+    // afresh (server/render.ts inhabit): the request is sent once more with
+    // it, or fails where none comes or the door refuses that one too.
+    if (retried) throw new Error(`${res.status} ${url}: the door refused the renewed token`);
     sessionStorage.removeItem("pronto-token");
-    location.reload();
+    const renewed = location.reload();
+    if (typeof renewed?.then === "function") {
+      await renewed;
+      const headers = { ...init?.headers };
+      // A request made while the guest was being renewed carried none.
+      if (token()) headers.Authorization = `Bearer ${token()}`;
+      return send(url, { ...init, headers }, true);
+    }
     return new Promise((resolve) => {
       reloading.add(() =>
         resolve({
@@ -595,6 +605,9 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     }
     return p;
   }
+  // A table no validation names has nothing to judge, and asking per row is an
+  // await and a predicate sort per row of a bulk write.
+  const judged = (table) => Object.keys(validations[table] ?? {}).length > 0;
 
   // The store seat: every validation of the table judges the row the write
   // would produce (validate.js), over the reader's own copy of the rows its
@@ -704,13 +717,42 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     return filled;
   };
 
+  // A table's seed is its rows or, for one too large to ride in the config the
+  // first screen waits on, {href} naming a JSON array of them beside it (a
+  // page bundle writes these, by content address). The file is fetched the
+  // first time the table is read, and every such file once the page is idle,
+  // so a table the reader opens later, or offline, is already at hand.
+  const seedFiles = new Map();
+  const seedFile = (href) => {
+    let p = seedFiles.get(href);
+    if (p === undefined) {
+      p = fetch(new URL(href, cfg.appBase ?? globalThis.location?.href)).then((res) => {
+        if (!res.ok) throw new Error(`seed ${href}: ${res.status}`);
+        return res.json();
+      });
+      p.catch(() => seedFiles.delete(href));
+      seedFiles.set(href, p);
+    }
+    return p;
+  };
+  const seedRows = (table) => {
+    const s = cfg.seed?.[table];
+    return s === undefined || Array.isArray(s) ? s : seedFile(s.href);
+  };
+  const seedHrefs = Object.values(cfg.seed ?? {}).filter((s) => !Array.isArray(s)).map((s) => s.href);
+  if (seedHrefs.length > 0 && typeof globalThis.requestIdleCallback === "function") {
+    globalThis.requestIdleCallback(() => {
+      for (const href of seedHrefs) seedFile(href).catch(() => {});
+    }, { timeout: 10_000 });
+  }
+
   // Written straight through the client, not through create(): a seed is the
   // program stating the collection's initial world, not a reader's gesture, so
   // there is no refusal to settle and no key to mint — the program names each
   // row's own. Called only where the store is built, which is what makes the
   // empty collection the whole ledger #Entity.seed relies on.
   async function seed(table) {
-    const rows = restoredTabs.has(table) ? restoredTabs.get(table) : cfg.seed?.[table];
+    const rows = restoredTabs.has(table) ? restoredTabs.get(table) : await seedRows(table);
     if (rows === undefined) return;
     const c = client.collections[table];
     if (c === undefined) throw new Error(`seed on unknown table: ${table}`);
@@ -2111,7 +2153,8 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     // the collection holds as a number is still that number when patched.
     const byKey = new Map(collection.toArray.map((r) => [String(r[key]), r]));
     const edgeIndex = new Map();
-    for (const [i, row] of rows.entries()) {
+    if (judged(table)) for (const [i, row] of rows.entries()) {
+
       const have = byKey.get(String(row[key]));
       if (have === undefined) await validate(table, "insert", blank(table, inserted(row, i)), undefined, edgeIndex);
       else await validate(table, "update", row, have, edgeIndex);
@@ -2155,7 +2198,7 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     const key = keyOf(table);
     const filled = rows.map((r) => blank(table, r));
     const edgeIndex = new Map();
-    for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
+    if (judged(table)) for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
     if (requestOnly(table)) return serverCommand(table, "POST", filled);
     await settle(
       onSettled(client.insert(table, filled), table, filled.map((r) => String(r[key]))),

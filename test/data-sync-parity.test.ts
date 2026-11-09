@@ -219,3 +219,24 @@ Deno.test({ name: "parity: a subscription stopped before its wake hears nothing"
   const fake = fakeDataSync({ [NOTE.name]: [] }) as unknown as Store
   expect(await heard(fake)).toBe(await heard(shipped))
 } })
+
+// A machine assigned a word to a count (an assign naming a handler the app
+// never wrote is a literal): the browser's client refused the write, and the
+// fake, which judged no types, took it, so `check machines` walked the arrow
+// green over a timer that never ran.
+const TYPED = { schema: { [NOTE.name]: { fields: [{ name: "id", type: "string" }, { name: "title", type: "string" }, { name: "n", type: "int32" }] } } }
+const MISTYPED: Op[] = [
+  ["add", [{ id: "a", title: "x", n: 1 }]],
+  ["add", [{ id: "b", title: "y", n: 2 }, { id: "c", title: "z", n: "bump" }]],
+  ["write", [{ key: "a", row: { n: "bump" } }]],
+  ["patch", [{ key: "a", changes: { n: 1.5 } }]],
+  ["upsertBy", { id: "a", title: "x", n: "bump" }],
+  ["patch", [{ key: "a", changes: { n: 2 } }]],
+]
+Deno.test({ name: "parity: a value its column's type cannot hold is refused, and its batch with it", sanitizeOps: false, sanitizeResources: false, fn: async () => {
+  const shipped = await createStore("", { carriers: FIXTURE_CARRIERS, local: { [NOTE.name]: "tab" }, ...TYPED }) as Store
+  const fake = fakeDataSync({ [NOTE.name]: [] }, { carriers: FIXTURE_CARRIERS, ...TYPED }) as unknown as Store
+  const want = await run(shipped, NOTE, MISTYPED)
+  expect(want.map((s) => s.refused)).toEqual([false, true, true, true, true, false])
+  expect((await run(fake, NOTE, MISTYPED)).map((s) => ({ refused: s.refused, rows: s.rows }))).toEqual(want.map((s) => ({ refused: s.refused, rows: s.rows })))
+} })

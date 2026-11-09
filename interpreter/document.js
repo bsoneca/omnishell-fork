@@ -23,6 +23,28 @@ import { assetURL, preloadScreen } from "./preloads.js";
  * for. */
 export const servesGuests = (cfg) => !cfg.auth?.required && (cfg.tables?.length ?? 0) > 0;
 
+// The entry's first paint (terminal.cue firstPaint) is for the entry alone, a page about to boot: a document a
+// reader, a crawler or a link preview gets whole carries none of it, nor the policy source its script needed.
+// An entry a release addressed (server/release-addresses.ts parses it and writes its outerHTML) spells the
+// marker `data-first-paint=""`: both spellings go, or the policy source goes and the script stays, which the
+// browser then refuses (a CSP violation) and which a crawler reads (the script reads the session's token).
+// Only the policy source of the script it removes goes with it: an addressed entry also holds an import map
+// and a speculation-rules script that the same policy names by hash, and with their hashes gone the browser
+// refuses them (an inline-script CSP violation on every table and profile document, 2026-11-08).
+export const withoutFirstPaint = async (entry) => {
+  const hashes = [];
+  const kept = entry.replace(/<(style|script) data-first-paint(?:="")?>([\s\S]*?)<\/\1>\n?/g, (_, tag, body) => {
+    if (tag === "script") hashes.push(body);
+    return "";
+  }).replace(/\n<!--first-paint-->[\s\S]*?<!--\/first-paint-->/, "");
+  let out = kept;
+  for (const body of hashes) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+    out = out.split(` 'sha256-${btoa(String.fromCharCode(...digest))}'`).join("");
+  }
+  return out;
+};
+
 /**
  * One document. `rows` says whether the store answers with the world: a
  * document rendered before any request (no rows to be had) is the screen as it
@@ -63,7 +85,7 @@ export async function renderDocument({
   onChunk,
 }) {
   if (typeof origin !== "string") throw new Error("a document's links are absolute, and no origin was given to spell them against");
-  const doc = parse(entry);
+  const doc = parse(await withoutFirstPaint(entry));
   const ambient = globalThis.document;
   globalThis.document = doc;
   const decorateDoc = (screen, cas) => {

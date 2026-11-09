@@ -8,6 +8,8 @@
 package terminal
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"list"
 	"strings"
 )
@@ -145,7 +147,7 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		}
 		auth: {
 			modes:     ["passkey", "guest"]
-			providers: ["google"]
+			providers: ["google", "phone"]
 			identity: "generated"
 			chrome:   "<name · handle> · sign out; self.route and self.name are the app's"
 		}
@@ -337,7 +339,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		sw: *"offline-first-sw.js" | string
 
 		assets: {
-			html: strings.Replace(strings.Replace(
+			html: strings.Replace(strings.Replace(_entry, "{firstpaint_head}", _firstPaintHead, 1), "{firstpaint_body}", _firstPaintBody, 1)
+			_entry: strings.Replace(strings.Replace(
 				strings.Replace(
 					strings.Replace(
 						strings.Replace(_shellHtmlAsset, "{description}", T.description, 1),
@@ -426,7 +429,32 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// floating to a new release would change them with no change here.
 		documentConfig: #Path
 		documentConfig: *"../../plugins/omnishell/server/deno.json" | string
-		contentSecurityPolicy: strings.TrimSpace(_cspAsset)
+		// An app that declares a firstPaint runs its script inline, so the script's hash is
+		// the one source the policy adds (meta and the door's header both read this field).
+		contentSecurityPolicy: [
+			if firstPaint != _|_ {strings.Replace(strings.TrimSpace(_cspAsset), "script-src 'self'", "script-src 'self' 'sha256-\(base64.Encode(null, sha256.Sum256(firstPaint.script)))' 'sha256-\(base64.Encode(null, sha256.Sum256(_speculationRules)))'", 1)},
+			strings.TrimSpace(_cspAsset),
+		][0]
+
+		// What the document paints before any external file has arrived (an app's critical
+		// CSS, its first screen's markup outside #app, and the one inline script that
+		// starts what that screen waits for at once, in parallel with the stylesheets).
+		// Generic: the terminal puts it in the entry document and nothing else; an app
+		// that declares none gets the document it always had, byte for byte.
+		firstPaint?: {
+			// A stylesheet, in a <style> in the head.
+			css: string
+			// Markup after #app in the body.
+			html: string
+			// A classic script in the head, ahead of the stylesheets, so it runs without
+			// waiting for them; its sha256 joins the policy's script-src. Free of "</script".
+			script: string
+		}
+		// With a hash in script-src the browser stops honouring 'inline-speculation-rules' (Chrome: the
+		// document's own <script type="speculationrules"> then needs its hash too), so it is named.
+		_speculationRules: strings.Split(strings.Split(_shellHtmlAsset, "<script type=\"speculationrules\">")[1], "</script>")[0]
+		_firstPaintHead: [if firstPaint != _|_ {"<style data-first-paint>\(firstPaint.css)</style>\n<script data-first-paint>\(firstPaint.script)</script>\n"}, ""][0]
+		_firstPaintBody: [if firstPaint != _|_ {"\n<!--first-paint-->\(firstPaint.html)<!--/first-paint-->"}, ""][0]
 		machineSchema: #Path
 		machineSchema: *"../../plugins/omnishell/machine.cue" | string
 

@@ -7,6 +7,7 @@ import { embedDeps, parseFilter, parseLimit } from "../interpreter/fragment.js";
 import { upsertKey as resolveKey } from "../interpreter/data-sync.js";
 import { batched } from "../interpreter/batched-store.js";
 import { seedQuery } from "./seed-query.ts";
+import { carriers } from "../interpreter/vendor/mecha-client.js";
 import type { Cluster, Row } from "./screen-harness.ts";
 
 /** data-sync.js is the shipped store, not a typed module: the natural key an
@@ -55,6 +56,9 @@ export type FakeDataSync = {
   version: number;
   /** Wakes scheduled and not yet delivered. */
   pendingWakes: number;
+  /** Deliver every scheduled wake now, as the shipped store's does; answers
+   * how many there were. */
+  flushNotifications(): number;
 };
 
 /**
@@ -77,6 +81,19 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
   ])) };
   type Sub = { fn: (changes?: Change[]) => void; batch: Change[]; scheduled: boolean; stopped: boolean };
   const subs = new Map<string, Set<Sub>>();
+  // A scheduled wake by its subscription, so a flush can deliver it ahead of
+  // its timer and the timer then finds nothing to do.
+  const due = new Map<Sub, ReturnType<typeof setTimeout>>();
+  const deliver = (sub: Sub) => {
+    clearTimeout(due.get(sub));
+    due.delete(sub);
+    sub.scheduled = false;
+    store.pendingWakes--;
+    const changes = sub.batch;
+    sub.batch = [];
+    // A region torn down before its wake is not woken.
+    if (!sub.stopped) sub.fn(changes);
+  };
   const minted = new Map<string, number>();
   const mintId = (table: string) => {
     const n = (minted.get(table) ?? 0) + 1;
@@ -139,15 +156,13 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
       if (sub.scheduled) continue;
       sub.scheduled = true;
       store.pendingWakes++;
-      setTimeout(() => {
-        sub.scheduled = false;
-        store.pendingWakes--;
-        const changes = sub.batch;
-        sub.batch = [];
-        // A region torn down before its wake is not woken.
-        if (!sub.stopped) sub.fn(changes);
-      }, 0);
+      due.set(sub, setTimeout(() => deliver(sub), 0));
     }
+  };
+  store.flushNotifications = () => {
+    const queued = [...due.keys()];
+    for (const sub of queued) deliver(sub);
+    return queued.length;
   };
 
   store.rows = (table) => of(table);
@@ -185,6 +200,19 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
     };
   };
 
+  // The shipped client converts every row it inserts or patches into its
+  // columns' canonical form (mecha's normalizeRow), and refuses one a column's
+  // type cannot hold: a fraction for an int32, a word for a count. Judged
+  // here by the same table, so a write the browser refuses is refused here,
+  // before any row of its batch lands; the rows are kept as given. A mount
+  // whose cluster states no carriers or no fields for the table judges none.
+  let bound: ReturnType<typeof carriers> | undefined;
+  const typed = (table: string, row: Row) => {
+    const fields = cluster.schema?.[table]?.fields;
+    if (cluster.carriers === undefined || fields === undefined) return;
+    (bound ??= carriers(cluster.carriers)).normalizeRow(fields, row);
+  };
+
   store.create = async (table, values) => {
     // The shipped store mints the key when the form does not carry one
     // (data-sync.js: retries are idempotent only because the id travels with
@@ -194,6 +222,7 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
     const given = owned(table, values);
     const key = keyOf(table);
     const row = given?.[key] === undefined ? { [key]: mintId(table), ...given } : given;
+    typed(table, row);
     store.calls.push({ op: "create", table, id: String(row[key]), row: { ...row } });
     const rows = of(table);
     if (rows.some((r) => String(r[keyOf(table)]) === String(row[keyOf(table)]))) {
@@ -228,6 +257,7 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
   };
 
   store.update = async (table, id, patch) => {
+    typed(table, patch);
     store.calls.push({ op: "update", table, id: String(id), row: { ...patch } });
     const rows = of(table);
     const i = indexOf(table, rows, id);
@@ -241,6 +271,7 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
   store.put = async (table, row) => {
     const key = keyOf(table);
     if (row?.[key] === undefined) throw new Error(`put ${table}: the row carries no ${key}`);
+    typed(table, row);
     store.calls.push({ op: "put", table, id: String(row[key]), row: { ...row } });
     const rows = of(table);
     const i = rows.findIndex((r) => String(r[keyOf(table)]) === String(row[keyOf(table)]));
@@ -296,15 +327,21 @@ export function fakeDataSync(tables: Record<string, Row[]>, cluster: Cluster = {
     const keys = rows.map((r) => String(r[keyOf(table)] ?? ""));
     const twice = keys.find((k, i) => k !== "" && (has(table, k) || keys.indexOf(k) !== i));
     if (twice !== undefined) throw new Error(`add ${table}: ${twice} is already there`);
+    for (const r of rows) typed(table, r);
   }, wrapped.add);
-  wrapped.patch = whole((table, edits: { key: string }[]) => {
+  wrapped.patch = whole((table, edits: { key: string; changes: Row }[]) => {
     const missing = edits.find((e) => !has(table, e.key));
     if (missing !== undefined) throw new Error(`patch ${table}: no row ${missing.key}`);
+    for (const e of edits) typed(table, e.changes);
   }, wrapped.patch);
   // An edit carries its key beside its row, under the column the table keys
   // on, and a batch with an edit naming none writes nothing.
   wrapped.write = whole((table, edits: { key: string; row: Row; absent?: Row }[]) => {
     if (edits.some((e) => e?.key === undefined)) throw new Error(`write ${table}: an edit names no ${keyOf(table)}`);
+    for (const e of edits) {
+      typed(table, e.row);
+      if (e.absent) typed(table, e.absent);
+    }
   }, async (table, edits: { key: string; row: Row; absent?: Row }[]) => {
     // `absent` states its columns only where the row is inserted, as data-sync's write does.
     for (const e of edits) {
