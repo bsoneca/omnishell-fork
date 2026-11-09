@@ -184,6 +184,45 @@ describe("a whole screen under the harness", () => {
     await m.stop()
   })
 
+  // A delayed beat is a new turn of the chain, not a step of it: a clock that
+  // beats once a second keeps beating past the bound on undelayed steps
+  // (PRONTO-117: Prontoweeper's clock stopped at its 8th second).
+  const beatsTo = (limit: number, then: string) => ({
+    ...FILES,
+    "shell/handlers/beat.js": `(state, event) => {
+  const row = (state.rows.tick ?? []).find((r) => r.id === "t1");
+  const beats = Number(row.beats);
+  if (beats >= ${limit}) return { updates: [] };
+  return {
+    updates: [{ op: "patch", entity: "tick", id: row.id, row: { beats: String(beats + 1) } }],
+    then: ${then},
+  };
+}`,
+  })
+
+  it("keeps a delayed chain beating past the bound on undelayed steps", async () => {
+    const m = await mountScreen({
+      route: ROUTE,
+      files: beatsTo(20, `{ type: "beat", delay: 500 }`),
+      seed: 7,
+      tables: { tick: [{ id: "t1", beats: "0" }] },
+    })
+    await m.settle()
+    expect(m.rows("tick")[0].beats).toBe("20")
+    await m.stop()
+  })
+
+  it("still stops a chain that continues without a pause", async () => {
+    const m = await mountScreen({
+      route: ROUTE,
+      files: beatsTo(20, `{ type: "beat" }`),
+      seed: 7,
+      tables: { tick: [{ id: "t1", beats: "0" }] },
+    })
+    await expect(m.settle()).rejects.toThrow(/did not settle in 8 steps at "beat"/)
+    await m.stop().catch(() => {})
+  })
+
   it("refuses a fetch the route does not name", async () => {
     await expect(mountScreen({
       route: { ...ROUTE, files: { ...ROUTE.files, css: "shell/screens/missing.css" } },
