@@ -1723,7 +1723,6 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // setAttribute would consume the placeholder template; persistent regions
   // (singletons) re-bind on every refresh, so originals are stashed.
   let stash = el._prontoAttrs;
-  const attrs = el.attributes ?? [];
   if (stash === undefined) {
     if (!hasBoundAttribute(el)) return;
     stash = el._prontoAttrs = {};
@@ -1733,7 +1732,7 @@ function bindElementAttributes(el, ctx, insideWalk = false) {
   // an empty boolean is absent, an empty href is not a URL — and iterating
   // only what is present would never visit it again, leaving it dead at the
   // first empty value it ever took.
-  const names = new Set([...attrs].map((a) => a.name));
+  const names = new Set(el.getAttributeNames?.() ?? []);
   for (const name of Object.keys(stash)) names.add(name);
   for (const name of names) {
     if (regionAttr(name)) continue;
@@ -1903,6 +1902,25 @@ function staticOrParam(template, ctx) {
 // Large folds leave their render to the store's next turn so queued input can run first.
 const PROMPT_FOLD_MS = 4;
 
+// Runs `wake` once the event `e` has reached every listener it has. A fold that
+// asks for its wake in the event's own task must not ask before then: Chrome
+// runs a microtask checkpoint between a real event's listeners, so a fold that
+// ends inside the first listener's turn would wake the screen before the next
+// listener — a machine on a region above, say — has written its half. The wake
+// is made at the window, the last stop of a bubbling event, and only for this
+// event; an event that does not bubble, or is already over (the fold outlived
+// its dispatch, or the host dispatches synchronously and has no phase to
+// report), wakes at once.
+function afterDispatch(e, wake) {
+  if (e?.bubbles && e.eventPhase > 0 && typeof globalThis.addEventListener === "function") {
+    globalThis.addEventListener(e.type, (done) => {
+      if (done === e) wake();
+    }, { once: true });
+  } else {
+    wake();
+  }
+}
+
 // Work in flight, by store, across every screen it serves: a document's slots
 // share one store, and a flush of its wakes reaches all of their regions.
 const inFlight = new WeakMap();
@@ -1926,11 +1944,31 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
   // keep their poll keys hot — stop them before mounting the next one.
   for (const stop of mount._prontoStops ?? []) stop();
   const cleanups = [];
+  // Submits made before their form was wired, by form, with the button that made each.
+  const heldSubmits = new Map();
   mount._prontoStops = cleanups;
   cleanups.push(hostDom.stop);
   // One seat per data-on-mutation handler, screen-wide (see wireEvents).
   const folds = new Map();
   const refreshes = new WeakMap();
+  // One lane per reduce, screen-wide: a run reads its world, reduces and
+  // writes before the next run of the same reduce reads. Two runs at once
+  // would each conclude from a world missing the other's writes — four quick
+  // taps that each move a piece leave the last one deciding from three stale
+  // pieces — so its events take turns, in the order they fired, whichever
+  // region they fired in. A lane holds only that read-reduce-write: a `then`
+  // with a delay waits outside it, and a refusal is fired, not awaited, so
+  // nothing a run awaits can wait on the run behind it.
+  const lanes = new Map();
+  const inLane = (reduce, run) => {
+    const turn = (lanes.get(reduce) ?? Promise.resolve()).then(run, run);
+    const tail = turn.then(() => {}, () => {});
+    lanes.set(reduce, tail);
+    tail.then(() => {
+      if (lanes.get(reduce) === tail) lanes.delete(reduce);
+    });
+    return turn;
+  };
   const work = new Set();
   const actions = new Set();
   const mutationWrites = new Set();
@@ -2181,6 +2219,22 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // The words are this catalogue's, whichever the document was drawn with.
     localize(screen);
   }
+
+  // The screen is on the page from here, but its forms are wired only once the
+  // modules below have loaded, and a region's as it hydrates. A form submitted
+  // before that is the browser's: a navigation to the form's own address with
+  // its fields in the query, which reloads the page and loses the write (a
+  // Join pressed while a slow host still loaded the screen's handlers). Such a
+  // submit is held instead, and wireForm makes it once the form is the shell's.
+  const holdUnwired = (e) => {
+    const form = e.target;
+    if (form?.tagName !== "FORM" || form._prontoForm || !form.matches("form[data-action]")) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    heldSubmits.set(form, e.submitter ?? null);
+  };
+  screen.addEventListener("submit", holdUnwired, true);
+  cleanups.push(() => screen.removeEventListener("submit", holdUnwired, true));
 
   // Keyed by the module's app-relative path, the one spelling every loader
   // and pronto's lint read.
@@ -2606,7 +2660,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         form.querySelector(".store-error")?.removeAttribute("hidden");
         setState(err?.name === "NonRetriableError" ? "validation-error" : "network-error");
       };
-      track((async () => {
+      const began = performance.now();
+      let job;
+      job = track((async () => {
         try {
           // A form's create mints the key the store now requires of every write:
           // retries are only idempotent because the key travels with each attempt.
@@ -2631,6 +2687,22 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             await store.dropWhere(entity, interpolateFilter(form.dataset.filter, wiring().getCtx()), refused);
           } else if (action === "delete") await store.drop(entity, [wiring().rowId()], refused);
           else throw new Error(`unknown action: ${action}`);
+          // The write has landed, so its regions are woken in the submit's own
+          // task, as a handler's fold's are (wireEvents): a wake left to the
+          // store's turn runs inside the next frame and the paint waits on it.
+          // Only while this submit is the store's one write in flight, and only
+          // when the store answered promptly — a synced table answers when the
+          // server does, long after the frame.
+          //
+          // And, as a handler's, not before the submit has reached every
+          // listener it has (afterDispatch): a machine above the form that
+          // also reads the submit has yet to write. By then this submit may
+          // itself be over, so its own share of the count is read from work.
+          const folded = performance.now() - began;
+          afterDispatch(e, () => {
+            const mine = job === undefined || work.has(job) ? 1 : 0;
+            if (inFlight.get(store) === mine && folded <= PROMPT_FOLD_MS) store.flushNotifications?.();
+          });
           dirty.add(entity);
           // Only a create is reset, ready for the next row. Any other form's
           // controls already show the row the write stated, and a reset would put
@@ -2663,6 +2735,15 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     form.addEventListener("change", () => {
       if (submitsOnChange(form)) form.requestSubmit();
     });
+    // A submit the reader made before this form was wired (heldSubmits) is
+    // its first, made now that the form is the shell's.
+    if (heldSubmits.has(form)) {
+      const submitter = heldSubmits.get(form);
+      heldSubmits.delete(form);
+      queueMicrotask(() => {
+        if (form.isConnected) form.requestSubmit(submitter?.isConnected && submitter.form === form ? submitter : undefined);
+      });
+    }
   }
 
   // Stage-4's only handler event source: DOM drags become {type:"move",
@@ -2720,7 +2801,12 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       const running = (region._prontoGesture ?? Promise.resolve()).then(() => run(release));
       const seat = Promise.race([running, paused]);
       region._prontoGesture = seat.then(() => undefined, () => undefined);
-      track(seat).catch(failed);
+      const tracked = track(seat);
+      tracked.catch(failed);
+      // The gesture's own share of the store's count in flight ends a few
+      // turns after `running` does; a caller that counts what else is in
+      // flight (the flush below) waits for it.
+      running.tracked = tracked;
       return running;
     };
     // {updates, then}. The command goes in the return, which is the whole of
@@ -2976,7 +3062,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
 
     const step = async (reduce, event, depth, pause, seat, automatic = event.type === "mutation", active, readItems) => {
       if (held === "stopped" || (active && !active())) return;
-      const next = await track((async () => {
+      const next = await track(inLane(reduce, async () => {
         if (held === "stopped") return;
         checkSettlement(region);
         const rows = await worldOf();
@@ -3005,7 +3091,7 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
           throw new Error(`handler chain did not settle in ${STEPS} steps at "${result.then.type}"`);
         }
         return result?.then;
-      })());
+      }));
       if (!next?.type || (active && !active())) return;
       if (next.delay > 0) {
         pause?.();
@@ -3092,10 +3178,35 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             // boundary, so what a reduce reads here is strings the terminal
             // built and never the unit's own object.
             if (e?.detail !== null && typeof e?.detail === "object") fired.detail = e.detail;
-            await gesture((pause) => step(reduce, fired, 0, pause));
-            // Flush only a short, complete fold: another screen's half-applied
-            // writes must not reach regions through this store-wide wake.
-            if (inFlight.get(store) === 0 && performance.now() - began <= PROMPT_FOLD_MS) store.flushNotifications?.();
+            const ran = gesture((pause) => step(reduce, fired, 0, pause));
+            await ran;
+            await ran.tracked.catch(() => {});
+            // The fold's writes have all landed, so the regions they moved are
+            // woken now, in the event's own task. After a click Chrome holds
+            // every task the click posted, even a user-blocking one, until it
+            // has rendered: the store's wake would run in the next frame's
+            // animation callback, inside that frame, and its paint waits on
+            // the work. Done here, the work is over before the frame begins.
+            // Only while no other fold on the store is mid-write, this
+            // screen's or another slot's — between its drop and its put a
+            // fold is half applied, and its wake is left to the store's own
+            // turn. A fold that took long writing has a long pass to come,
+            // and it too is left to the store's turn (PROMPT_FOLD_MS).
+            //
+            // And not before the event has reached every listener it has. A
+            // press on a card is this handler's and, one level up, the table
+            // machine's: the machine's own fold has yet to write. Chrome runs
+            // a microtask checkpoint between a real event's listeners, so this
+            // fold can finish, and its flush wake the screen, before the next
+            // listener has run — and a reduce woken between the two reads the
+            // half of the press that has landed (a card held, a machine still
+            // idle) and takes it for a press let go. The flush waits for the
+            // event to finish dispatching, where the machine's fold is in
+            // flight and the wake is left to the store's turn, as it was.
+            const folded = performance.now() - began;
+            afterDispatch(e, () => {
+              if (inFlight.get(store) === 0 && folded <= PROMPT_FOLD_MS) store.flushNotifications?.();
+            });
           } catch (err) {
             report(err);
             setState("network-error");
@@ -3877,6 +3988,27 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       },
       row: undefined,
     };
+    // A row's ctx, one per row on show. A class, not a literal: the literal's
+    // locale accessor leaves every row's object in dictionary mode, which at
+    // ten thousand rows is the largest thing the region holds.
+    class RowCtx {
+      constructor(row, chain) {
+        this.params = ctx.params;
+        this.inert = ctx.inert;
+        this.messages = ctx.messages;
+        this.i18n = ctx.i18n;
+        this.cfg = ctx.cfg;
+        this.timeZone = ctx.timeZone;
+        this.adapters = ctx.adapters;
+        this.enclosing = enclosingOf(ctx);
+        this.table = table;
+        this.row = row;
+        this.chain = chain;
+      }
+      get locale() {
+        return ctx.locale ?? currentLocale;
+      }
+    }
     // A named template may reference itself, so nesting depth is data-driven
     // and its floor is a leaf whose child read returns no rows. Cyclic data
     // removes the floor: the same (template, row) pair hydrating inside itself
@@ -4034,7 +4166,9 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
     // exactly as a filter moves with its value, and the store keys a maintained
     // view on the whole read — so an order left out of this comparison is a
     // sortable header that writes its column and never re-reads.
+    const NO_NESTED = new Map();
     const syncNested = (entry, ready) => {
+      if (entry.nested === NO_NESTED) entry.nested = new Map();
       const present = nestedOf(entry.node);
       // One a newer template took out stops with it.
       for (const [el, held] of entry.nested) {
@@ -4117,11 +4251,30 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
         drawn ??= new Map([...region.children].reverse().map((child) => [child.dataset?.id, child]));
         node = drawn.get(String(entry.ctx.row.id)) ?? null;
       }
-      if (node) {
+      if (node && templates.length > 1) {
+        // A region with a template per kind: the served row was drawn from the
+        // kind its row had when it was served (or cached), and the store's row
+        // may be another kind by now. That is a kind flip, as a surviving row's
+        // is below, not a refusal: the served node is not this template's
+        // render, so the row is stamped fresh and the served one leaves with
+        // the pass's placement.
+        const item = tmpl.content.firstElementChild.cloneNode(true);
+        try {
+          // Kinds that share a tag differ by what they state: the adoption
+          // below would keep the wrong kind's node and bind its row to it.
+          if (!sameKind(item, node)) throw new ProgramError("the served row is another kind's");
+          if (region._prontoStale) morphTree(node, item.cloneNode(true), { slots: true });
+          adoptTree(item, node, { rows: !region._prontoStale });
+        } catch (err) {
+          if (!(err instanceof ProgramError)) throw err;
+          node = null;
+        }
+      } else if (node) {
         const item = tmpl.content.firstElementChild.cloneNode(true);
         if (region._prontoStale) morphTree(node, item.cloneNode(true), { slots: true });
         adoptTree(item, node, { rows: !region._prontoStale });
-      } else {
+      }
+      if (!node) {
         node = tmpl.content.firstElementChild.cloneNode(true);
         node.dataset.id = entry.ctx.row.id;
         // A fresh clone is its template's markup exactly, so the template's
@@ -4229,23 +4382,10 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
             if (arrived) {
               const tmpl = templateFor(row);
               entry = {
-                ctx: {
-                  params: ctx.params,
-                  enclosing: enclosingOf(ctx),
-                  inert: ctx.inert,
-                  messages: ctx.messages,
-                  i18n: ctx.i18n,
-                  cfg: ctx.cfg,
-                  timeZone: ctx.timeZone,
-                  adapters: ctx.adapters,
-                  table,
-                  get locale() {
-                    return ctx.locale ?? currentLocale;
-                  },
-                  row,
-                  chain: chainInto(tmpl, row),
-                },
-                nested: new Map(),
+                ctx: new RowCtx(row, chainInto(tmpl, row)),
+                // Shared and empty until syncNested holds a region for it:
+                // most rows nest nothing.
+                nested: NO_NESTED,
               };
               stamp(entry, tmpl);
               live.set(key, entry);
@@ -5042,6 +5182,26 @@ export function templateHash(text) {
   h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (h2 >>> 0).toString(16).padStart(8, "0") + (h1 >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
+ * Whether a served node is the render of a template's item: the same tags down
+ * the tree, and the same class where the item states one (a class with no
+ * binding in it). Regions, templates and hatches under it are theirs to adopt.
+ * Two kinds of a row that share a tag and differ by a class are told apart
+ * here; adoptTree alone would keep the old kind's node.
+ */
+function sameKind(from, to) {
+  if (from.localName !== to.localName) return false;
+  if (from.localName === "template" || from.hasAttribute("data-live") || from.hasAttribute("data-hatch")) return true;
+  const klass = from.getAttribute("class");
+  if (klass === null ? to.getAttribute("class") !== null : !klass.includes("{") && klass !== to.getAttribute("class")) {
+    return false;
+  }
+  const theirs = [...to.children];
+  const ours = [...from.children];
+  if (ours.length !== theirs.length) return false;
+  return ours.every((child, at) => sameKind(child, theirs[at]));
 }
 
 /** A region whose children are rows: it states item templates, or names one. */

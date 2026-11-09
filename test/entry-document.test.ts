@@ -5,6 +5,7 @@
 // noticed: build, lint and every suite passed over a platform on which no
 // JavaScript ran at any route, and only the browser tier said so.
 import { describe, expect, it } from "@test/harness"
+import { withoutFirstPaint } from "../interpreter/document.js"
 
 const template = await Deno.readTextFile(new URL("../shell.html", import.meta.url))
 const shell = await Deno.readTextFile(new URL("../interpreter/shell.js", import.meta.url))
@@ -60,4 +61,39 @@ describe("the shell's own config read", () => {
     expect(shell).toContain("new URL(config, document.baseURI)")
     expect(shell).not.toContain("new URL(config, location.href)")
   })
+})
+
+describe("the entry document's first paint", () => {
+  it("has its holes ahead of every stylesheet and after #app, so an app that fills none gets the same bytes", () => {
+    // The script runs without waiting for the stylesheets only if it is ahead of them.
+    const head = template.indexOf("{firstpaint_head}")
+    expect(head).toBeGreaterThan(-1)
+    expect(head).toBeLessThan(template.indexOf('rel="stylesheet"'))
+    expect(template).toContain('<main id="app"></main>{firstpaint_body}\n')
+  })
+})
+
+describe("a document's first paint", () => {
+  const script = "sessionStorage.getItem('pronto-token')"
+  const importmap = '{"imports":{}}'
+  const sha = async (text: string) =>
+    `'sha256-${btoa(String.fromCharCode(...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))))}'`
+  const paint = async (marker: string) =>
+    `<head><meta http-equiv="Content-Security-Policy" content="script-src 'self' ${await sha(importmap)} ${await sha(script)} 'unsafe-eval'">` +
+    `<script id="pronto-assets" type="importmap">${importmap}</script>` +
+    `<style ${marker}>#fp{}</style>\n<script ${marker}>${script}</script></head>` +
+    `<body><main id="app"></main>\n<!--first-paint--><div id="fp"></div><!--/first-paint--></body>`
+  // Both spellings: the entry as the terminal writes it, and as a release's addressing writes it back.
+  for (const marker of ["data-first-paint", 'data-first-paint=""']) {
+    it(`is dropped from an entry that marks it ${marker}, with the policy source of its script and no other`, async () => {
+      const out = await withoutFirstPaint(await paint(marker))
+      expect(out).not.toContain("first-paint")
+      expect(out).not.toContain("pronto-token")
+      expect(out).not.toContain(await sha(script))
+      // The import map an addressing added is inline too, and its policy source stays: without it the
+      // browser refuses the map on every rendered document.
+      expect(out).toContain(await sha(importmap))
+      expect(out).toContain('<main id="app"></main>')
+    })
+  }
 })

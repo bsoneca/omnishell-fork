@@ -951,6 +951,12 @@ export function routeAt(cfg, pathname, search, preferred) {
   return null;
 }
 
+/** Whether an address (routeAt's answer) is a screen an app behind a sign-in
+ * shows to visitors: its route's access is "public" (pronto's #Screen.access),
+ * so whoever arrives sees it with a guest session and no sign-in. Anywhere
+ * else in such an app, and in an app with no sign-in to require, it is not. */
+export const opensToVisitors = (cfg, at) => cfg.auth?.required === true && at?.route?.access === "public";
+
 export const COALESCE_CONTROLS = new Set(["select", "order", "limit", "offset"]);
 const COALESCE_AGGREGATE = /\b(?:count|sum|avg|max|min)\(\)/;
 const PROGRESSIVE_READ_PREFIX = "<!--pronto-read:";

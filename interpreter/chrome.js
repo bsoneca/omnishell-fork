@@ -40,6 +40,9 @@ const PROMOTE = {
 // (auth.providers), drawn at the gate and in a guest's strip.
 const PROVIDERS = {
   chrome_signin_google: "Continue with Google",
+  // A phone number texted a code, through an identity broker that offers it
+  // (pronto-identity's broker/phone.ts).
+  chrome_signin_phone: "Continue with your phone",
 };
 
 /** The key a provider's way in is spoken under. */
