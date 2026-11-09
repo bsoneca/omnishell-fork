@@ -575,8 +575,15 @@ describe("the server terminal's store", () => {
       }
     }
     const read = () => createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS }).query("game", null, {})
-    const within = (work: Promise<unknown>) =>
-      Promise.race([work.then(() => "answered", (e) => String(e)), new Promise((r) => setTimeout(() => r("pending"), 200))])
+    // Whether the read settles within 200 ms; the timer is cleared either way, so no test leaks it.
+    const within = async (work: Promise<unknown>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([work.then(() => "answered", (e) => String(e)), new Promise((r) => { timer = setTimeout(() => r("pending"), 200) })])
+      } finally {
+        clearTimeout(timer)
+      }
+    }
 
     it("is sent again with the guest minted afresh", async () => {
       // A refused /auth/shape stayed pending after the renewal, so the shape
