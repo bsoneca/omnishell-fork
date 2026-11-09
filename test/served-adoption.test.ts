@@ -546,3 +546,49 @@ describe("newer templates reaching a running screen", () => {
     handle.stop()
   })
 })
+
+// A region with a template per kind, served when its row was one kind and taken
+// over when the store's row is another: the kind flip of a served row.
+const KINDS = `<section class="screen" data-screen="wall">
+  <h1>Wall</h1>
+  <ul class="cards" data-live="note" data-order="position.asc">
+    <template data-item data-when="kind=eq.a"><li class="plain" data-text="{title}"></li></template>
+    <template data-item data-when="kind=eq.b"><li class="loud" data-text="{title}"></li></template>
+    <template data-item><i hidden></i></template>
+  </ul>
+</section>`
+
+describe("a served row whose kind has changed since it was served", () => {
+  it("is stamped from the store's kind instead of refusing the screen", async () => {
+    const html = await served(KINDS, { note: [{ id: "n1", title: "One", kind: "z", position: 1 }] })
+    expect(parseHTML(html).document.querySelector(".cards > i")).not.toBe(null)
+    const live = store({ note: [{ id: "n1", title: "One", kind: "a", position: 1 }, { id: "n2", title: "Two", kind: "b", position: 2 }] })
+    const { screen, handle } = await adopt(html, KINDS, live)
+    const cards = [...screen.querySelectorAll(".cards > *")]
+    expect(cards.map((c) => c.localName + "." + (c.getAttribute("class") ?? ""))).toEqual(["li.plain", "li.loud"])
+    expect(cards.map((c) => c.textContent)).toEqual(["One", "Two"])
+    handle.stop()
+  })
+
+  it("is stamped fresh when two kinds share a tag", async () => {
+    const html = await served(KINDS, { note: [{ id: "n1", title: "One", kind: "a", position: 1 }] })
+    const live = store({ note: [{ id: "n1", title: "One", kind: "b", position: 1 }] })
+    const { screen, handle } = await adopt(html, KINDS, live)
+    expect([...screen.querySelectorAll(".cards > *")].map((c) => c.getAttribute("class"))).toEqual(["loud"])
+    handle.stop()
+  })
+  it("is stamped fresh when the other kind states no class, or a class below its root", async () => {
+    const SHAPES = `<section class="screen" data-screen="wall">
+  <ul class="cards" data-live="note" data-order="position.asc">
+    <template data-item data-when="kind=eq.a"><li class="plain"><span class="x" data-text="{title}"></span></li></template>
+    <template data-item data-when="kind=eq.b"><li><span class="y" data-text="{title}"></span></li></template>
+    <template data-item><i hidden></i></template>
+  </ul>
+</section>`
+    const html = await served(SHAPES, { note: [{ id: "n1", title: "One", kind: "a", position: 1 }, { id: "n2", title: "Two", kind: "b", position: 2 }] })
+    const live = store({ note: [{ id: "n1", title: "One", kind: "b", position: 1 }, { id: "n2", title: "Two", kind: "a", position: 2 }] })
+    const { screen, handle } = await adopt(html, SHAPES, live)
+    expect([...screen.querySelectorAll(".cards > li")].map((c) => `${c.getAttribute("class") ?? ""}/${c.querySelector("span")!.getAttribute("class")}`)).toEqual(["/y", "plain/x"])
+    handle.stop()
+  })
+})
