@@ -2856,46 +2856,58 @@ export async function interpretScreen(mount, appBase, route, store, params = {},
       return true;
     };
 
+    // A chain is a loop, not a recursion: a clock that beats for an hour holds
+    // no tower of awaiting frames. STEPS bounds the continuations a reduce
+    // asks for with no pause between them, which is a reduce that never
+    // settles. A `then` with a delay is a new turn after a wait, as a click is:
+    // it starts the count again, so a clock beating once a second is not
+    // stopped at its eighth second (PRONTO-117).
     const step = async (reduce, event, depth, pause) => {
-      if (held === "stopped") return;
-      const next = await track(inLane(reduce, async () => {
+      for (;;) {
         if (held === "stopped") return;
-        checkSettlement(region);
-        const result = reduce({ items: getRows(), rows: await worldOf() }, event);
-        // A promise is not a continuation command and cannot be a reduce.
-        if (typeof result?.then === "function") {
-          throw new Error(`handler for "${event.type}" returned a promise; a reduce returns its updates`);
+        const at = depth;
+        const next = await track(inLane(reduce, async () => {
+          if (held === "stopped") return;
+          checkSettlement(region);
+          const result = reduce({ items: getRows(), rows: await worldOf() }, event);
+          // A promise is not a continuation command and cannot be a reduce.
+          if (typeof result?.then === "function") {
+            throw new Error(`handler for "${event.type}" returned a promise; a reduce returns its updates`);
+          }
+          if (!await applyUpdates(result?.updates ?? [], deliver)) return;
+          if (result?.effects && result.effects.length > 0) {
+            if (!await applyEffects(result.effects, deliver)) return;
+          }
+          if (result?.then?.type && !(result.then.delay > 0) && at + 1 >= STEPS) {
+            throw new Error(`handler chain did not settle in ${STEPS} steps at "${result.then.type}"`);
+          }
+          return result?.then;
+        }));
+        if (!next?.type) return;
+        if (next.delay > 0) {
+          pause?.();
+          await rest(next.delay / TEMPO, { kind: "then", type: next.type });
+          depth = 0;
+        } else {
+          depth += 1;
         }
-        if (!await applyUpdates(result?.updates ?? [], deliver)) return;
-        if (result?.effects && result.effects.length > 0) {
-          if (!await applyEffects(result.effects, deliver)) return;
+        const carried = { type: next.type };
+        // A draw the reduce asked for. It has no randomness of its own — the
+        // compartment endows nothing — so it says it wants one and is called
+        // again with it, the same way it says it wants to wait. The terminal
+        // owning the draw is also what lets a screen be replayed: with ?seed= it
+        // draws from that instead, and the same run comes back.
+        if (next.seed === true) {
+          const actor = actorOf.get(reduce);
+          if (actor === undefined) throw new Error(`a draw asked for by a reduce no name was registered for, at "${next.type}"`);
+          carried.seed = draw(actor);
         }
-        if (result?.then?.type && depth + 1 >= STEPS) {
-          throw new Error(`handler chain did not settle in ${STEPS} steps at "${result.then.type}"`);
+        if (next.with !== undefined) carried.with = next.with;
+        if (typeof carried.type === "string" && carried.type.startsWith("intent:")) {
+          screen.dispatchEvent?.(new CustomEvent("pronto:intent", { detail: carried, bubbles: true }));
         }
-        return result?.then;
-      }));
-      if (!next?.type) return;
-      if (next.delay > 0) {
-        pause?.();
-        await rest(next.delay / TEMPO, { kind: "then", type: next.type });
+        event = carried;
       }
-      const carried = { type: next.type };
-      // A draw the reduce asked for. It has no randomness of its own — the
-      // compartment endows nothing — so it says it wants one and is called
-      // again with it, the same way it says it wants to wait. The terminal
-      // owning the draw is also what lets a screen be replayed: with ?seed= it
-      // draws from that instead, and the same run comes back.
-      if (next.seed === true) {
-        const actor = actorOf.get(reduce);
-        if (actor === undefined) throw new Error(`a draw asked for by a reduce no name was registered for, at "${next.type}"`);
-        carried.seed = draw(actor);
-      }
-      if (next.with !== undefined) carried.with = next.with;
-      if (typeof carried.type === "string" && carried.type.startsWith("intent:")) {
-        screen.dispatchEvent?.(new CustomEvent("pronto:intent", { detail: carried, bubbles: true }));
-      }
-      await step(reduce, carried, depth + 1, pause);
     };
 
     const bind = (el, id) => {
