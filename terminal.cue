@@ -432,7 +432,7 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// An app that declares a firstPaint runs its script inline, so the script's hash is
 		// the one source the policy adds (meta and the door's header both read this field).
 		contentSecurityPolicy: [
-			if firstPaint != _|_ {strings.Replace(strings.TrimSpace(_cspAsset), "script-src 'self'", "script-src 'self' 'sha256-\(base64.Encode(null, sha256.Sum256(firstPaint.script)))' 'sha256-\(base64.Encode(null, sha256.Sum256(_speculationRules)))'", 1)},
+			if firstPaint != _|_ {strings.Replace(strings.TrimSpace(_cspAsset), "script-src 'self'", "script-src 'self' 'sha256-\(base64.Encode(null, sha256.Sum256(firstPaint.script)))'", 1)},
 			strings.TrimSpace(_cspAsset),
 		][0]
 
@@ -450,9 +450,6 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 			// waiting for them; its sha256 joins the policy's script-src. Free of "</script".
 			script: string
 		}
-		// With a hash in script-src the browser stops honouring 'inline-speculation-rules' (Chrome: the
-		// document's own <script type="speculationrules"> then needs its hash too), so it is named.
-		_speculationRules: strings.Split(strings.Split(_shellHtmlAsset, "<script type=\"speculationrules\">")[1], "</script>")[0]
 		_firstPaintHead: [if firstPaint != _|_ {"<style data-first-paint>\(firstPaint.css)</style>\n<script data-first-paint>\(firstPaint.script)</script>\n"}, ""][0]
 		_firstPaintBody: [if firstPaint != _|_ {"\n<!--first-paint-->\(firstPaint.html)<!--/first-paint-->"}, ""][0]
 		machineSchema: #Path
