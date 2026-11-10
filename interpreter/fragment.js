@@ -1160,9 +1160,12 @@ export function coalesceReads(readRows, canCoalesceEq) {
       });
     }
     for (const group of singles) {
+      // A read that answers no row list (a store closed under it) fails its callers; caught after
+      // resolveGroup, so nothing it throws is left unhandled.
       Promise.resolve(group.raw).then(readRows).then((rows) => {
+        if (!Array.isArray(rows)) throw new TypeError(`read of ${String(group.raw)} answered no row list`);
         resolveGroup(group, rows);
-      }, (err) => {
+      }).catch((err) => {
         rejectGroup(group, err);
       });
     }

@@ -651,6 +651,13 @@ describe("a document carrying its reads", () => {
     })
   })
 
+  it("fails a single read that answers no row list, rather than throwing where nothing catches it", async () => {
+    // A store closed under a read answered it with no rows; resolving its callers threw in the
+    // read's success handler, an unhandled rejection that ends a Deno process (PRONTO-138).
+    const coalesced = coalesceReads(async () => undefined as unknown as unknown[])
+    await expect(coalesced("/crud/game?select=*")).rejects.toThrow("answered no row list")
+  })
+
   it("throws when a coalesced in.(...) read returns a row whose column spelling differs from the eq filter, and restricts schema eq coalescing to declared text and lowercase uuid fields", async () => {
     const coalesced = coalesceReads(async () => [
       { id: "g1", kickoff: "2026-10-22T18:00:00+00:00" },
