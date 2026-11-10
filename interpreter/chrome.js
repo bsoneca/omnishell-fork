@@ -202,6 +202,12 @@ export function localizeStrip(nav, cfg, { locale, here, search = "", messages, e
  * every link, which is what makes them absolute: the origin the reader arrived
  * at, so nothing here has to be told where the app is deployed, or what stands
  * for it in a document rendered before any request. */
+/** What the app is called where a reader sees its name (a document's title, the
+ * sign-in's heading): its display name when the program gives one, else its
+ * `app`, which is also the name its services, images and storage go by and so
+ * may be no word a reader knows ("battlechess" for Bonk Chess). */
+export const appTitle = (cfg) => cfg.title ?? cfg.app;
+
 export function describe(doc, cfg, { route, params, locale, written, el, origin }) {
   // The language RENDERED, which is what a screen reader has to pronounce,
   // and which way its script runs, which is what the nav strip, the
@@ -222,7 +228,7 @@ export function describe(doc, cfg, { route, params, locale, written, el, origin 
     title = doc.createElement("title");
     doc.head.append(title);
   }
-  title.textContent = name ? `${name} — ${cfg.app}` : cfg.app;
+  title.textContent = name ? `${name} — ${appTitle(cfg)}` : appTitle(cfg);
 
   for (const old of doc.head.querySelectorAll('link[rel="canonical"], link[rel="alternate"][hreflang]')) {
     old.remove();
