@@ -932,11 +932,13 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         if (session.user?.guest !== true) dropKeptGuest();
       } else {
         mintedGuest = true;
-        guestSession = mintGuest(cfg, served !== null).then((s) => {
+        guestSession = mintGuest(cfg, served !== null).then(async (s) => {
+          // Kept before anything holds the session, so a visit that wrote
+          // with it is one the next visit returns to. Never throws.
+          await keepGuest(cfg, s);
           session = s;
           if (!hadInitialOwner) initialDraftOwner = sessionOwner(s);
           sessionStorage.setItem("pronto-token", JSON.stringify(s));
-          keepGuest(cfg, s).catch(() => {});
           if (recovery && recovery.owner === null && !hadInitialOwner) {
             recovery.owner = sessionOwner(s);
             retainRecovery();
