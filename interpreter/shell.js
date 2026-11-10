@@ -80,6 +80,26 @@ export async function flagOn(name, fetchFn = globalThis.fetch) {
   }
 }
 
+/** Hands the guest this tab holds to the auth service before a provider's sign-in leaves the page, so the account the
+ * provider makes is the guest's, its rows and progress with it (PRONTO-209): only where the app's auth names a flag in
+ * `adoptGuest` and it is on, and only for a guest. The service answers 204 and holds the guest in a short-lived cookie
+ * the sign-in's callback reads. Fails open: any other answer, or none, is the sign-in as it always was. */
+export async function adoptGuest(cfg, session, fetchFn = globalThis.fetch) {
+  const name = cfg.auth?.adoptGuest;
+  if (!name || typeof cfg.auth?.service !== "string" || session?.user?.guest !== true || typeof session.token !== "string") return false;
+  if (!(await flagOn(name, fetchFn))) return false;
+  try {
+    const res = await fetchFn(`${cfg.auth.service}/oidc/adopt`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { authorization: `Bearer ${session.token}` },
+    });
+    return res.status === 204;
+  } catch {
+    return false;
+  }
+}
+
 /** Keeps a freshly minted guest for the next visit, when the flag is on. */
 export async function keepGuest(cfg, session, storage = browserStorage(), fetchFn = globalThis.fetch) {
   const name = cfg.auth?.keepGuest;
@@ -412,6 +432,22 @@ function renderPromote(ensureSession, cfg, chrome, served = null) {
   const box = served?.querySelector(".shell-signin, .shell-provider") ? served : guestBox(document, cfg);
   const signIn = box.querySelector(".shell-signin");
   const create = box.querySelector(".shell-register");
+  // A provider's way in is a link that leaves the page: where the app asks it (auth.adoptGuest), the guest is handed to
+  // the auth service first, then the link is followed. A modified click (a new tab) is the browser's own.
+  if (cfg.auth?.adoptGuest) {
+    for (const link of box.querySelectorAll(".shell-provider")) {
+      link.addEventListener("click", async (event) => {
+        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        event.preventDefault();
+        try {
+          await adoptGuest(cfg, await ensureSession());
+        } catch (err) {
+          console.error(err);
+        }
+        location.assign(link.href);
+      });
+    }
+  }
   if (!supportsPasskeys()) {
     signIn?.remove();
     create?.remove();
