@@ -44,9 +44,85 @@ const sessionOwner = (session) => {
   const subject = claimsOf(session.token)?.sub ?? session.user?.id;
   return JSON.stringify(subject === undefined ? ["token", session.token] : ["subject", subject]);
 };
+// A guest kept across visits in this browser, where the app's auth names a
+// flag in `keepGuest` and that flag is on (PRONTO-208). A session lives in
+// the tab, so without this every visit is a new, empty guest. Only a guest is
+// kept: an account's way back is its own sign-in.
+export const KEPT_GUEST = "pronto-guest";
+const browserStorage = () => {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    // A browser that refuses site storage throws on the property itself.
+    return null;
+  }
+};
+const dropKeptGuest = (storage = browserStorage()) => {
+  try {
+    storage?.removeItem(KEPT_GUEST);
+  } catch { /* storage refused: nothing kept */ }
+};
+
+/** Whether a boolean flag is on, asked over OpenFeature's remote evaluation
+ * protocol at the app's own /ofrep/. Fails CLOSED: no answer is off, so an
+ * app without the flag service, or offline, behaves as it always did. */
+export async function flagOn(name, fetchFn = globalThis.fetch) {
+  try {
+    const res = await fetchFn(`/ofrep/v1/evaluate/flags/${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ context: {} }),
+    });
+    if (!res.ok) return false;
+    return (await res.json())?.value === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Keeps a freshly minted guest for the next visit, when the flag is on. */
+export async function keepGuest(cfg, session, storage = browserStorage(), fetchFn = globalThis.fetch) {
+  const name = cfg.auth?.keepGuest;
+  if (!name || storage === null || session?.user?.guest !== true) return false;
+  if (!(await flagOn(name, fetchFn))) return false;
+  try {
+    storage.setItem(KEPT_GUEST, JSON.stringify(session));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The guest an earlier visit kept, or null: only while the flag is on and
+ * its account lives (`lives`, accountLives below; an expired token is a dead
+ * session, so it is dropped and a new guest minted). */
+export async function keptGuest(cfg, storage = browserStorage(), fetchFn = globalThis.fetch, lives = accountLives) {
+  const name = cfg.auth?.keepGuest;
+  if (!name || storage === null) return null;
+  let kept;
+  try {
+    kept = JSON.parse(storage.getItem(KEPT_GUEST) ?? "null");
+  } catch {
+    dropKeptGuest(storage);
+    return null;
+  }
+  if (kept === null) return null;
+  if (typeof kept?.token !== "string" || kept.user?.guest !== true) {
+    dropKeptGuest(storage);
+    return null;
+  }
+  const [on, alive] = await Promise.all([flagOn(name, fetchFn), lives(kept)]);
+  if (!alive) {
+    dropKeptGuest(storage);
+    return null;
+  }
+  return on ? kept : null;
+}
+
 const forgetSession = () => {
   sessionStorage.removeItem(recoveryKey);
   sessionStorage.removeItem("pronto-token");
+  dropKeptGuest();
 };
 const storedSessionOwner = () => {
   try {
@@ -360,6 +436,7 @@ function renderPromote(ensureSession, cfg, chrome, served = null) {
     }
     if (sessionOwner(next) !== sessionOwner(current)) sessionStorage.removeItem(recoveryKey);
     sessionStorage.setItem("pronto-token", JSON.stringify(next));
+    if (next?.user?.guest !== true) dropKeptGuest();
     location.reload();
   };
   signIn?.addEventListener("click", () => authenticate(signIn, (session) => passkeyCeremony(cfg.auth.service, session.token)));
@@ -841,11 +918,24 @@ export async function createShell({ config, mount, preload = true, hostDomModule
           stored = null;
         }
       }
+      if (!stored) {
+        const kept = await keptGuest(cfg);
+        if (kept !== null) {
+          stored = JSON.stringify(kept);
+          sessionStorage.setItem("pronto-token", stored);
+        }
+      }
       if (stored) {
         session = JSON.parse(stored);
+        // An account in this tab, a provider's or a passkey's: the guest an
+        // earlier visit kept is left behind, as signing in leaves it.
+        if (session.user?.guest !== true) dropKeptGuest();
       } else {
         mintedGuest = true;
-        guestSession = mintGuest(cfg, served !== null).then((s) => {
+        guestSession = mintGuest(cfg, served !== null).then(async (s) => {
+          // Kept before anything holds the session, so a visit that wrote
+          // with it is one the next visit returns to. Never throws.
+          await keepGuest(cfg, s);
           session = s;
           if (!hadInitialOwner) initialDraftOwner = sessionOwner(s);
           sessionStorage.setItem("pronto-token", JSON.stringify(s));
