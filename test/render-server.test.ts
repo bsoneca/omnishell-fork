@@ -526,15 +526,18 @@ describe("the server terminal's store", () => {
     const global = globalThis as unknown as Record<string, unknown>
     const ambient = names.map((n) => [n, Object.getOwnPropertyDescriptor(globalThis, n)] as const)
     let refused: unknown
+    let store: ReturnType<typeof createStore> | undefined
     try {
       inhabit("http://caddy:8080", (err) => (refused = err))
       global.fetch = () => Promise.resolve(new Response("", { status: 401 }))
       sessionStorage.setItem("pronto-token", JSON.stringify({ token: "refused" }))
-      const read = createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS }).query("game", null, {})
+      store = createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS })
+      const read = store.query("game", null, {})
       await new Promise((r) => setTimeout(r, 0))
       expect(String(refused)).toContain("refused")
       expect(await Promise.race([read.then(() => "answered", () => "threw"), new Promise((r) => setTimeout(() => r("pending"), 10))])).toBe("pending")
     } finally {
+      await store?.close()
       for (const [n, d] of ambient) {
         if (d === undefined) delete global[n]
         else Object.defineProperty(globalThis, n, d)
@@ -610,6 +613,8 @@ describe("the server terminal's store", () => {
         if (stored !== "") sessionStorage.setItem("pronto-token", JSON.stringify({ token: stored }))
         await body(seen)
       } finally {
+        // A store left open keeps its retry timers past the test.
+        await Promise.all(stores.splice(0).map((s) => s.close()))
         for (const [n, d] of ambient) {
           if (d === undefined) delete global[n]
           else Object.defineProperty(globalThis, n, d)
@@ -617,7 +622,12 @@ describe("the server terminal's store", () => {
         sessionStorage.removeItem("pronto-token")
       }
     }
-    const read = () => createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS }).query("game", null, {})
+    const stores: { close(): Promise<void> }[] = []
+    const read = () => {
+      const store = createStore("http://caddy:8080", { tables: [], carriers: FIXTURE_CARRIERS })
+      stores.push(store)
+      return store.query("game", null, {})
+    }
     // Whether the read settles within 200 ms; the timer is cleared either way, so no test leaks it.
     const within = async (work: Promise<unknown>) => {
       let timer: ReturnType<typeof setTimeout> | undefined
