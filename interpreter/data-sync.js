@@ -389,6 +389,27 @@ export function settle(promise, acceptMs = ACCEPT_MS, onRefused) {
  * (it materialises server-side from the session). null when nothing covers
  * the values, which the caller turns into a program error.
  */
+/**
+ * Whether a create this reader sent landed as its own row. The gateway sends
+ * every POST with resolution=ignore-duplicates, so an insert whose key is
+ * already taken answers 201 with no row and writes nothing: the same answer a
+ * replay of this reader's own create gets, which is why the gateway does it.
+ * The two part on whose row the key now names. `held` is the row this
+ * reader's synced collection has for the key, `read` the row the server
+ * answered when asked for the key (null: none this reader may see; undefined:
+ * not asked). A row this reader may see is its own unless the table has an
+ * owner column naming someone else; a key it cannot see at all is someone
+ * else's (PRONTO-103: two guests on one seed minted one id, and the second
+ * was told its game was saved).
+ */
+export function createLanded(held, read, owner, me) {
+  const row = held ?? read;
+  if (row === undefined) return "unknown";
+  if (row === null) return "taken";
+  if (owner !== undefined && row[owner] != null && row[owner] !== me) return "taken";
+  return "own";
+}
+
 export function upsertKey(uniques, pk, owner, values) {
   const candidates = uniques ?? [[pk]];
   return candidates.find((cols) => cols.every((c) => values[c] !== undefined || c === owner)) ?? null;
@@ -2200,11 +2221,40 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
     const edgeIndex = new Map();
     if (judged(table)) for (const row of filled) await validate(table, "insert", row, undefined, edgeIndex);
     if (requestOnly(table)) return serverCommand(table, "POST", filled);
+    const keys = filled.map((r) => String(r[key]));
     await settle(
-      onSettled(client.insert(table, filled), table, filled.map((r) => String(r[key]))),
+      onSettled(client.insert(table, filled).then(() => landed(table, keys)), table, keys),
       ACCEPT_MS,
       onRefused,
     );
+  }
+
+  // The insert is delivered; each key must now name this reader's own row
+  // (createLanded). A key the synced collection lacks is asked of the server,
+  // since a lazy table holds only the rows a view loaded.
+  async function landed(table, keys) {
+    const collection = client.collections[table];
+    const owner = access[table]?.owner;
+    const me = userId();
+    const synced = (k) => collection?._state?.syncedData?.get(k) ?? collection?._state?.syncedData?.get(Number(k));
+    const missing = keys.filter((k) => synced(k) === undefined);
+    const read = new Map();
+    if (missing.length > 0) {
+      // A read that fails says nothing about the write, which the server
+      // accepted: it is not turned into a refusal.
+      let rows;
+      try {
+        rows = await requestRows(`${crud(table)}?${keyOf(table)}=in.(${missing.map(encodeURIComponent).join(",")})`, { method: "GET" });
+      } catch {
+        return;
+      }
+      for (const row of rows) read.set(String(row[keyOf(table)]), row);
+    }
+    const taken = keys.filter((k) => createLanded(synced(k), synced(k) === undefined ? (read.get(k) ?? null) : undefined, owner, me) === "taken");
+    if (taken.length === 0) return;
+    const err = new Error(`create ${table} ${taken.join(", ")}: the key names a row that is not this reader's, so nothing was written`);
+    err.name = "NonRetriableError";
+    throw err;
   }
 
   // A write by key names its row, and a table read lazily holds only the
