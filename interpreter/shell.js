@@ -16,7 +16,7 @@ import { parseMarkup } from "./markup.js";
 // bypasses it entirely: the fixture adapter runs without the cluster, so no auth
 // service exists to sign against.
 
-import { chromeText, describe, drawStrip, guestBox, hasStrip, localizeStrip, offersGuest, providerHref, providerKey, stripRoutes, supportsPasskeys } from "./chrome.js";
+import { appTitle, chromeText, describe, drawStrip, guestBox, hasStrip, localizeStrip, offersGuest, providerHref, providerKey, stripRoutes, supportsPasskeys } from "./chrome.js";
 import { localeAt, localeTable, opensToVisitors, ProgramError, restatedHref, routeAt, routeHref, screenEnv, Unanswered } from "./fragment.js";
 import { activateScreenStyle, fetchText, forgetFiles, interpretScreen, prefetchScreen, templateHash, submitsOnChange, AssetMissing } from "./screen.js";
 
@@ -292,8 +292,8 @@ function renderLogin(mount, cfg, chrome) {
     a.textContent = chrome(providerKey(provider));
     wrap.querySelector(".login-passkey").before(a);
   }
-  wrap.querySelector("h1").textContent = cfg.app;
-  wrap.querySelector(".login-mark").textContent = [...cfg.app][0]?.toLocaleUpperCase() ?? "";
+  wrap.querySelector("h1").textContent = appTitle(cfg);
+  wrap.querySelector(".login-mark").textContent = [...appTitle(cfg)][0]?.toLocaleUpperCase() ?? "";
   wrap.querySelector(".login-hint").textContent = chrome("chrome_signin_hint");
   wrap.querySelector("button[type=submit]").textContent = chrome("chrome_signin");
   wrap.querySelector(".login-guest").textContent = chrome("chrome_signin_guest");
@@ -720,7 +720,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       : await Promise.all([import("./row-attachments.js"), import("./cortex-navigation.js")]);
     const rowAttachments = cfg.cortex === undefined ? undefined : createRowAttachments(Object.fromEntries(Object.entries(cfg.cortex.actors ?? {}).filter(([, binding]) => binding.via === "rows")));
     // A served document's head already says what it is.
-    if (served === null) document.title = cfg.app;
+    if (served === null) document.title = appTitle(cfg);
 
     const search = new URLSearchParams(location.search);
     // This app's own reading of an address, at the terminal's preferences.

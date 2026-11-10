@@ -100,6 +100,9 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 
 #Terminal: T={
 	app: string
+	// What a reader calls the app (a document's title, the sign-in's heading),
+	// where `app`, the name its services go by, is no word for a reader.
+	title?: string & != ""
 	// Fills the entry page's meta description. Double quotes would close the
 	// attribute they land in.
 	description: string
