@@ -100,23 +100,58 @@ export async function adoptGuest(cfg, session, fetchFn = globalThis.fetch) {
   }
 }
 
-/** Keeps a freshly minted guest for the next visit, when the flag is on. */
-export async function keepGuest(cfg, session, storage = browserStorage(), fetchFn = globalThis.fetch) {
+/** Keeps a freshly minted guest for the next visit, when the flag is on, with
+ * the moment it was kept (`keptAt`, ms): its token's life is told from it. */
+export async function keepGuest(cfg, session, storage = browserStorage(), fetchFn = globalThis.fetch, now = Date.now) {
   const name = cfg.auth?.keepGuest;
   if (!name || storage === null || session?.user?.guest !== true) return false;
   if (!(await flagOn(name, fetchFn))) return false;
   try {
-    storage.setItem(KEPT_GUEST, JSON.stringify(session));
+    storage.setItem(KEPT_GUEST, JSON.stringify({ ...session, keptAt: now() }));
     return true;
   } catch {
     return false;
   }
 }
 
+/** Whether a kept guest's token is due a refresh: expired, or past half its
+ * life (from `keptAt` to its exp). A token whose exp cannot be read is left as
+ * it is; one kept before `keptAt` existed is refreshed once. */
+function refreshDue(kept, at) {
+  const exp = claimsOf(kept.token)?.exp;
+  if (typeof exp !== "number") return false;
+  const end = exp * 1000;
+  if (end <= at) return true;
+  return typeof kept.keptAt !== "number" || at >= kept.keptAt + (end - kept.keptAt) / 2;
+}
+
+/** A kept guest's token traded at the auth service for a new one of the same
+ * account (PRONTO-272): the new session; null where the service refuses it
+ * (401 a token past its grace, 404 a gone account, 409 a guest that became
+ * an account), so it is dropped and a new guest minted; or the session as it
+ * was where no answer came (fail open, as accountLives). */
+async function refreshGuest(cfg, kept, fetchFn) {
+  if (typeof cfg.auth?.service !== "string") return kept;
+  try {
+    const res = await fetchFn(`${cfg.auth.service}/guest/refresh`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${kept.token}` },
+    });
+    if ([401, 404, 409].includes(res.status)) return null;
+    if (!res.ok) return kept;
+    const fresh = await res.json();
+    return typeof fresh?.token === "string" && fresh.user?.guest === true ? fresh : kept;
+  } catch {
+    return kept;
+  }
+}
+
 /** The guest an earlier visit kept, or null: only while the flag is on and
- * its account lives (`lives`, accountLives below; an expired token is a dead
- * session, so it is dropped and a new guest minted). */
-export async function keptGuest(cfg, storage = browserStorage(), fetchFn = globalThis.fetch, lives = accountLives) {
+ * its account lives (`lives`, accountLives below). A token due a refresh
+ * (refreshDue) is first traded for a new one, so a guest who comes back keeps
+ * its account past its token's week; one the auth service refuses is dropped
+ * and a new guest minted. */
+export async function keptGuest(cfg, storage = browserStorage(), fetchFn = globalThis.fetch, lives = accountLives, now = Date.now) {
   const name = cfg.auth?.keepGuest;
   if (!name || storage === null) return null;
   let kept;
@@ -131,12 +166,28 @@ export async function keptGuest(cfg, storage = browserStorage(), fetchFn = globa
     dropKeptGuest(storage);
     return null;
   }
-  const [on, alive] = await Promise.all([flagOn(name, fetchFn), lives(kept)]);
-  if (!alive) {
+  const { keptAt: _keptAt, ...session } = kept;
+  const at = now();
+  const due = refreshDue(kept, at);
+  const [on, alive] = await Promise.all([flagOn(name, fetchFn), due ? null : lives(session)]);
+  if (due && on) {
+    const fresh = await refreshGuest(cfg, session, fetchFn);
+    if (fresh === null) {
+      dropKeptGuest(storage);
+      return null;
+    }
+    if (fresh !== session) {
+      try {
+        storage.setItem(KEPT_GUEST, JSON.stringify({ ...fresh, keptAt: at }));
+      } catch { /* storage refused: this visit has it still */ }
+    }
+    return fresh;
+  }
+  if (!(due ? await lives(session) : alive)) {
     dropKeptGuest(storage);
     return null;
   }
-  return on ? kept : null;
+  return on ? session : null;
 }
 
 const forgetSession = () => {

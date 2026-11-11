@@ -40,10 +40,10 @@ Deno.test("no answer from the flag service is off", async () => {
   expect(await flagOn("keep_guest", () => Promise.reject(new TypeError("fetch failed")))).toBe(false)
 })
 
-Deno.test("a minted guest is kept while the flag is on", async () => {
+Deno.test("a minted guest is kept while the flag is on, with when it was kept", async () => {
   const store = memory()
-  expect(await keepGuest(cfg, guest, store, flag(true))).toBe(true)
-  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual(guest)
+  expect(await keepGuest(cfg, guest, store, flag(true), () => 1000)).toBe(true)
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual({ ...guest, keptAt: 1000 })
 })
 
 Deno.test("nothing is kept with the flag off, with no flag named, or for an account", async () => {
@@ -90,4 +90,74 @@ Deno.test("an app that names no flag, or a browser without storage, keeps nothin
   expect(await keptGuest({ auth: { required: false, service: "/auth" } }, store, flag(true), lives(true))).toBe(null)
   expect(await keptGuest(cfg, null, flag(true), lives(true))).toBe(null)
   expect(await keepGuest(cfg, guest, null, flag(true))).toBe(false)
+})
+
+// A kept guest's token runs out a week after it was minted (PRONTO-272): one due a refresh (past half
+// its life, or expired) is traded at the auth service for a new one of the same account first.
+const DAY = 24 * 3600 * 1000
+const T0 = Date.UTC(2026, 10, 1)
+const tokenFor = (expMs: number) => `h.${btoa(JSON.stringify({ sub: "g1", guest: true, exp: Math.floor(expMs / 1000) })).replace(/=+$/, "")}.s`
+const keptAt = (keptMs: number, expMs: number) => ({ token: tokenFor(expMs), user: guest.user, keptAt: keptMs })
+const fresh = { token: tokenFor(T0 + 30 * DAY), user: { id: "g1", handle: "h", guest: true } }
+// The flag on, and the refresh answering `status` (or failing to answer).
+function service(status: number | "offline", flagValue = true) {
+  const asked: { url: string; auth?: string }[] = []
+  const fn = (url: RequestInfo | URL, init?: RequestInit) => {
+    const u = String(url)
+    asked.push({ url: u, auth: (init?.headers as Record<string, string> | undefined)?.authorization })
+    if (u.startsWith("/ofrep/")) return Promise.resolve(new Response(JSON.stringify({ value: flagValue })))
+    if (status === "offline") return Promise.reject(new TypeError("fetch failed"))
+    return Promise.resolve(new Response(status === 200 ? JSON.stringify(fresh) : "{}", { status }))
+  }
+  return Object.assign(fn, { asked, refreshes: () => asked.filter((a) => a.url === "/auth/guest/refresh") })
+}
+
+Deno.test("a kept guest past half its token's life is refreshed and the new token kept", async () => {
+  const kept = keptAt(T0, T0 + 7 * DAY)
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(kept) })
+  const f = service(200)
+  const now = T0 + 4 * DAY
+  expect(await keptGuest(cfg, store, f, lives(true), () => now)).toEqual(fresh)
+  expect(f.refreshes()).toEqual([{ url: "/auth/guest/refresh", auth: `Bearer ${kept.token}` }])
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual({ ...fresh, keptAt: now })
+})
+
+Deno.test("a kept guest whose token expired is refreshed, and comes back as itself", async () => {
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(keptAt(T0, T0 + 7 * DAY)) })
+  const f = service(200)
+  // Asked whether its account lives with the dead token, it would be dropped: the refresh comes first.
+  expect(await keptGuest(cfg, store, f, lives(false), () => T0 + 20 * DAY)).toEqual(fresh)
+  expect(f.refreshes().length).toBe(1)
+})
+
+Deno.test("a kept guest early in its token's life is used as it is, unrefreshed", async () => {
+  const kept = keptAt(T0, T0 + 7 * DAY)
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(kept) })
+  const f = service(200)
+  expect(await keptGuest(cfg, store, f, lives(true), () => T0 + 1 * DAY)).toEqual({ token: kept.token, user: kept.user })
+  expect(f.refreshes().length).toBe(0)
+})
+
+Deno.test("a refresh the auth service refuses (401, 404, 409) drops the kept guest", async () => {
+  for (const status of [401, 404, 409]) {
+    const store = memory({ [KEPT_GUEST]: JSON.stringify(keptAt(T0, T0 + 7 * DAY)) })
+    expect(await keptGuest(cfg, store, service(status), lives(true), () => T0 + 20 * DAY)).toBe(null)
+    expect(store.map.has(KEPT_GUEST)).toBe(false)
+  }
+})
+
+Deno.test("a refresh with no answer keeps the kept guest as it is (fail open)", async () => {
+  for (const status of ["offline", 503] as const) {
+    const kept = keptAt(T0, T0 + 7 * DAY)
+    const store = memory({ [KEPT_GUEST]: JSON.stringify(kept) })
+    expect(await keptGuest(cfg, store, service(status), lives(true), () => T0 + 5 * DAY)).toEqual({ token: kept.token, user: kept.user })
+    expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual(kept)
+  }
+})
+
+Deno.test("with the flag off no refresh is asked for", async () => {
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(keptAt(T0, T0 + 7 * DAY)) })
+  const f = service(200, false)
+  expect(await keptGuest(cfg, store, f, lives(true), () => T0 + 5 * DAY)).toBe(null)
+  expect(f.refreshes().length).toBe(0)
 })
