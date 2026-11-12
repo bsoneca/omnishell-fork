@@ -27,6 +27,7 @@
 import { parseHTML } from "linkedom";
 import { controlProperties } from "./linkedom-controls.ts";
 import { publicSSR } from "./render-eligibility.ts";
+import { doorReadiness } from "./ready.ts";
 
 type Store = {
   subscribe(table: string, fn: () => void, opts?: unknown): () => void;
@@ -478,6 +479,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
       // ignore if non-configurable
     }
   }
+  const doorOk = doorReadiness({ fetch: globalThis.fetch, url: `${door}/shell/shell.json` });
   globalThis.fetch = stickyFetch(boundedFetch(globalThis.fetch, doorTimeout));
 
   const read = async (path: string) => {
@@ -568,6 +570,10 @@ export async function serve(env: (name: string) => string | undefined = (name) =
   Deno.serve({ port, hostname: ["local", "host"].includes(Deno.env.get("SAYT_PLATFORM") ?? "") ? "127.0.0.1" : "0.0.0.0", onListen: () => {} }, (req) => {
     if (new URL(req.url).pathname === "/health") {
       return new Response(ready ? "ok\n" : "syncing\n", { status: ready ? 200 : 503 });
+    }
+    // Ready once synced and the door answers (PRONTO-451); liveness is /health alone.
+    if (new URL(req.url).pathname === "/ready") {
+      return ready ? doorOk().then((ok) => new Response(ok ? "ok\n" : "door not answering\n", { status: ok ? 200 : 503 })) : new Response("syncing\n", { status: 503 });
     }
     return renderer.handle(req);
   });
