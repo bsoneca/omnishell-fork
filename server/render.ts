@@ -358,6 +358,31 @@ export function boundedFetch(fetch: typeof globalThis.fetch, ms: number): typeof
 }
 
 /**
+ * The door keeps a reader on one Electric pod by a cookie (pronto's electric-upstream-pods,
+ * PRONTO-364): each pod keeps its own shape log, so a long-poll another pod answers is a 409 and
+ * the shape is fetched again. A browser keeps the cookie itself; the renderer keeps it here, the
+ * one it was last given, and sends it with every read after. No other cookie is kept or touched.
+ */
+export function stickyFetch(fetch: typeof globalThis.fetch, name = "pronto_electric"): typeof globalThis.fetch {
+  let kept: string | null = null;
+  return async (input, init) => {
+    let sent = init;
+    if (kept !== null) {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      const others = (headers.get("cookie") ?? "").split(";").map((c) => c.trim()).filter((c) => c !== "" && !c.startsWith(`${name}=`));
+      headers.set("cookie", [...others, kept].join("; "));
+      sent = { ...init, headers };
+    }
+    const res = await fetch(input, sent);
+    for (const c of res.headers.getSetCookie()) {
+      const pair = c.split(";", 1)[0].trim();
+      if (pair.startsWith(`${name}=`)) kept = pair;
+    }
+    return res;
+  };
+}
+
+/**
  * The request-only reads a render makes, recorded as the store makes them: the
  * body of each GET the door's /crud answers with success, under its path and
  * query, and nothing of how it was asked. The renderer reads as a guest, so a
@@ -453,7 +478,7 @@ export async function serve(env: (name: string) => string | undefined = (name) =
       // ignore if non-configurable
     }
   }
-  globalThis.fetch = boundedFetch(globalThis.fetch, doorTimeout);
+  globalThis.fetch = stickyFetch(boundedFetch(globalThis.fetch, doorTimeout));
 
   const read = async (path: string) => {
     const res = await fetch(`${door}${path}`);

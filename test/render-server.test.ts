@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@test/harness"
-import { admittedOrigin, boundedFetch, createRenderer, inhabit, keepGuest, serve, warmEagerTables, watchRefusals } from "../server/render.ts"
+import { admittedOrigin, boundedFetch, createRenderer, inhabit, keepGuest, serve, stickyFetch, warmEagerTables, watchRefusals } from "../server/render.ts"
 import { createStore } from "../interpreter/data-sync.js"
 import { FIXTURE_CARRIERS } from "../interpreter/fixture-types.js"
 
@@ -430,6 +430,50 @@ describe("the renderer's reads through its door", () => {
   it("end the renderer at start where no bound is set", async () => {
     const env: Record<string, string> = { DOOR: "http://127.0.0.1:9", ENTRY: "/nowhere", ORIGIN: "https://gol.example" }
     await expect(serve((name) => env[name])).rejects.toThrow("DOOR_TIMEOUT_MS")
+  })
+})
+
+describe("the renderer's reads through the door", () => {
+  // The door keeps a reader on one Electric pod by its cookie (PRONTO-364).
+  const door = () => {
+    const sent: (string | null)[] = []
+    const fetch: typeof globalThis.fetch = async (input, init) => {
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+      sent.push(headers.get("cookie"))
+      const res = new Response("[]", { status: 200 })
+      res.headers.append("set-cookie", "pronto_electric=pod-a-hmac; Path=/; HttpOnly")
+      res.headers.append("set-cookie", "other=x; Path=/")
+      return res
+    }
+    return { sent, fetch }
+  }
+
+  it("send the door's Electric cookie back once given it, and no other", async () => {
+    const d = door()
+    const read = stickyFetch(d.fetch)
+    await read("http://door/electric/v1/shape?table=team&offset=-1")
+    await read("http://door/electric/v1/shape?table=team&offset=0_0&handle=h")
+    await read(new Request("http://door/crud/team"))
+    expect(d.sent).toEqual([null, "pronto_electric=pod-a-hmac", "pronto_electric=pod-a-hmac"])
+  })
+
+  it("keep a request's own cookies beside it, and take a newer one when the door moves the reader", async () => {
+    const d = door()
+    const read = stickyFetch(d.fetch)
+    await read("http://door/electric/v1/shape?table=team&offset=-1")
+    await read("http://door/x", { headers: { cookie: "mine=1; pronto_electric=stale" } })
+    expect(d.sent[1]).toBe("mine=1; pronto_electric=pod-a-hmac")
+    const moved: typeof globalThis.fetch = async () => {
+      const res = new Response("", { status: 409 })
+      res.headers.append("set-cookie", "pronto_electric=pod-b-hmac; Path=/")
+      return res
+    }
+    let calls = 0
+    const both: typeof globalThis.fetch = (input, init) => (calls++ === 0 ? moved(input, init) : d.fetch(input, init))
+    const again = stickyFetch(both)
+    await again("http://door/electric/v1/shape?table=team&offset=0_0&handle=h")
+    await again("http://door/electric/v1/shape?table=team&offset=-1")
+    expect(d.sent[2]).toBe("pronto_electric=pod-b-hmac")
   })
 })
 
