@@ -29,8 +29,9 @@ export type Entity = {
     unique?: boolean;
     default?: string | number | boolean | null;
     defaulted?: boolean;
-    /** What the integer counts, where it counts money (schema.cue #Field). */
-    money?: { currency: string; minorUnits: number };
+    /** What the integer counts, where it counts money (schema.cue #Field.money): the
+     * column's own currency, or the sibling field holding each row's. */
+    money?: { currency: string; minorUnits: number } | { currencyField: string };
   }[];
   uniques?: Unique[];
   access?: { mode: string; owner?: string; shared?: unknown };
@@ -676,6 +677,8 @@ export type FormatBinding = {
   /** The region whose row the element binds — its own data-live, or the
    * nearest enclosing one. Absent where the element sits under none. */
   table?: string;
+  /** That region's data-select, where it declares one: the columns its rows carry. */
+  select?: string;
 };
 
 /** Every formatted binding on a screen, one per placeholder. Template content
@@ -683,19 +686,24 @@ export type FormatBinding = {
  * holding it, which is the table the stack already carries. */
 export function formatBindings(html: string): FormatBinding[] {
   const out: FormatBinding[] = [];
-  walkTags<{ tag: string; table?: string }>(html, (tag, attrText, stack) => {
+  walkTags<{ tag: string; table?: string; select?: string }>(html, (tag, attrText, stack) => {
     const { attr } = attrsOf(attrText);
     const own = attr("data-live");
+    const ownSelect = own === undefined ? undefined : attr("data-select");
     const format = attr("data-text-format");
     const text = attr("data-text");
     if (format !== undefined && text !== undefined) {
       // Its own region first, when it is one: the interpreter binds a region's
       // own data-text in that region's context, not its parent's (bindTexts is
       // handed the region as its scope and matches it).
-      const table = own ?? stack.findLast((f) => f.table !== undefined)?.table;
-      for (const [, expr] of text.matchAll(PLACEHOLDERS)) out.push({ format, expr, table });
+      const region = own === undefined ? stack.findLast((f) => f.table !== undefined) : { table: own, select: ownSelect };
+      const table = region?.table;
+      const select = region?.select;
+      for (const [, expr] of text.matchAll(PLACEHOLDERS)) {
+        out.push(select === undefined ? { format, expr, table } : { format, expr, table, select });
+      }
     }
-    return { tag, table: own };
+    return { tag, table: own, select: ownSelect };
   });
   return out;
 }
@@ -727,7 +735,45 @@ export function formatLint(b: FormatBinding, entity: Entity | undefined): string
   if (column.money === undefined) {
     return `data-text-format="money" reads {${b.expr}}, which declares no money: on "${b.table}"`;
   }
+  // A row's currency rides the row the region reads: a sibling the table lacks,
+  // or one the region's data-select leaves out, leaves the amount without one.
+  const money = column.money;
+  if ("currencyField" in money) {
+    if (!entity.fields.some((f) => f.name === money.currencyField)) {
+      return `data-text-format="money" reads {${b.expr}}, whose currency field ${money.currencyField} is not a column of "${b.table}"`;
+    }
+    if (!selectKeeps(b.select, money.currencyField)) {
+      return `data-text-format="money" reads {${b.expr}}, whose currency field ${money.currencyField} ` +
+        `the region's data-select="${b.select}" leaves out of the row`;
+    }
+  }
   return null;
+}
+
+/** Whether a data-select hands each row the named column. No select and `*`
+ * keep every column; a list keeps the ones it names, under their alias where
+ * one is given (`alias:column`, a cast after `::`). An embed (`table(cols)`) or
+ * an aggregate (`column.sum()`) is not the column. */
+export function selectKeeps(select: string | undefined, column: string): boolean {
+  if (select === undefined) return true;
+  const items: string[] = [];
+  let depth = 0;
+  let item = "";
+  for (const ch of select) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (ch === "," && depth === 0) {
+      items.push(item);
+      item = "";
+    } else item += ch;
+  }
+  items.push(item);
+  return items.some((raw) => {
+    const t = raw.trim();
+    if (t === "*") return true;
+    const m = /^(?:([a-z_][a-z0-9_]*):(?!:))?([a-z_][a-z0-9_]*)(?:::[a-z0-9_]+)?$/.exec(t);
+    return m !== null && (m[1] ?? m[2]) === column;
+  });
 }
 
 export type KindedRegion = { table: string; whens: (string | undefined)[]; projects?: string[] };

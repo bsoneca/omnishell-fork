@@ -86,6 +86,55 @@ describe("formatLint", () => {
       .toContain('reads {ghost}, which is not a column of "expense"')
   })
 
+  it("reads a row's currency off a sibling column the table has, and refuses one it lacks", () => {
+    const offer: Entity = {
+      table: "offer",
+      durability: "server",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "rent", type: "int64", money: { currencyField: "rent_currency" } },
+        { name: "rent_currency", type: "string" },
+        { name: "fee", type: "int64", money: { currencyField: "fee_currency" } },
+      ],
+    }
+    expect(formatLint({ format: "money", expr: "rent", table: "offer" }, offer)).toBe(null)
+    expect(formatLint({ format: "money", expr: "fee", table: "offer" }, offer))
+      .toBe('data-text-format="money" reads {fee}, whose currency field fee_currency is not a column of "offer"')
+  })
+
+  it("refuses a data-select that leaves a row's currency out, and keeps every other", () => {
+    const offer: Entity = {
+      table: "offer",
+      durability: "server",
+      fields: [
+        { name: "id", type: "uuid", pk: true },
+        { name: "rent", type: "int64", money: { currencyField: "rent_currency" } },
+        { name: "rent_currency", type: "string" },
+        { name: "deposit", type: "int32", money: { currency: "JPY", minorUnits: 0 } },
+      ],
+    }
+    const html = (select: string) =>
+      `<ul data-live="offer" data-select="${select}"><template data-item><li data-text="{rent}" data-text-format="money"></li></template></ul>`
+    for (const select of ["*", "*,device(name)", "id,rent,rent_currency", "rent,rent_currency::text", "id, rent , rent_currency"]) {
+      expect(formatLint(one(html(select)), offer)).toBe(null)
+    }
+    for (const select of ["id,rent", "rent,currency:rent_currency", "rent,rent_currency(code)", "rent,rent_currency.count()"]) {
+      expect(formatLint(one(html(select)), offer))
+        .toBe(`data-text-format="money" reads {rent}, whose currency field rent_currency the region's data-select="${select}" leaves out of the row`)
+    }
+    // The column's own currency rides no row, so a projection cannot drop it.
+    const deposit = '<div data-live="offer" data-select="id,deposit"><span data-text="{deposit}" data-text-format="money"></span></div>'
+    expect(formatLint(one(deposit), offer)).toBe(null)
+  })
+
+  it("carries the select of the region whose row it binds", () => {
+    expect(one('<div data-live="offer" data-select="id,rent"><p><span data-text="{rent}" data-text-format="money"></span></p></div>'))
+      .toEqual({ format: "money", expr: "rent", table: "offer", select: "id,rent" })
+    // A nested region's own select, not its parent's.
+    expect(one('<div data-live="a" data-select="*"><div data-live="offer"><span data-text="{rent}" data-text-format="money"></span></div></div>'))
+      .toEqual({ format: "money", expr: "rent", table: "offer" })
+  })
+
   it("refuses money outside every region", () => {
     expect(formatLint({ format: "money", expr: "total", table: undefined }, undefined))
       .toContain("outside every data-live region")
