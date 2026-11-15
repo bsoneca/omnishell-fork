@@ -570,12 +570,13 @@ const withTemplates = (screen) => {
 // data-text-format names one of two things. plain, datetime, date, time, number, language and money
 // are value formatting — text in, text out, no DOM. Any other name is a
 // renderer: a Jessie module the app declared in files.renderers, resolved by
-// basename exactly as a handler is.
-const TEXT_FORMATS = new Set(["plain", "datetime", "date", "time", "number", "language"]);
+// basename exactly as a handler is. The list is terminal.cue's "text-formats";
+// test/text-formats.test.ts holds the two to each other.
+export const TEXT_FORMATS = new Set(["plain", "datetime", "date", "time", "number", "language", "money"]);
 
 // The built-ins that format the looked-up VALUE rather than interpolate a
 // sentence around it. plain is not one: it is the default spelled out.
-const VALUE_FORMATS = new Set(["datetime", "date", "time", "number", "language"]);
+const VALUE_FORMATS = new Set(["datetime", "date", "time", "number", "language", "money"]);
 
 async function loadRenderers(screen, appBase, route, endowmentsMap = {}) {
   const declared = route.files.renderers ?? [];
@@ -1014,6 +1015,73 @@ export function formatNumber(value, ctx) {
   // The string, not Number(text): a value wider than a double survives to the
   // formatter, which reads a decimal literal exactly.
   return numberFormatFor(localeOf(ctx) ?? "en-US").format(text);
+}
+
+// The currency a money binding's column declares (schema.cue #Field.money), as
+// {code, minorUnits}: the column's own, or each row's, read off the sibling
+// field that holds `{code}_{decimals}` (an ISO 4217 code or a longer alpha
+// code, 0 to 18 decimals). A row with no currency yet answers undefined, and
+// its amount shows as it is. A column declaring none, or a row the region's
+// data-select hands without its currency field, is the program wrong:
+// check-markup refuses both, and so does a live render.
+export function currencyOf(expr, ctx) {
+  const field = ctx?.cfg?.schema?.[ctx?.table]?.fields?.find((f) => f.name === expr);
+  const money = field?.money;
+  if (money === undefined) {
+    if (ctx?.inert === true) return undefined;
+    throw new ProjectionError(`data-text-format="money" reads {${expr}}, which declares no money on "${ctx?.table}"`);
+  }
+  if (money.currencyField === undefined) return { code: money.currency, minorUnits: money.minorUnits };
+  const row = ctx?.row ?? {};
+  if (!(money.currencyField in row)) {
+    // An optimistic insert carries only the submitted fields; the synced row
+    // brings the rest, its currency with them.
+    if (ctx?.inert === true || row.$synced === false) return undefined;
+    throw new ProjectionError(
+      `data-text-format="money" reads {${expr}}, whose currency field ${money.currencyField} the row does not carry: ` +
+        "a data-select naming columns must name it too",
+    );
+  }
+  const parts = /^([A-Z][A-Z0-9]*)_(0|[1-9]|1[0-8])$/.exec(row[money.currencyField] ?? "");
+  return parts === null ? undefined : { code: parts[1], minorUnits: Number(parts[2]) };
+}
+
+// Built once per locale, code and scale: this runs per binding per refresh.
+const MONIES = new Map();
+function moneyFormatFor(locale, code, minorUnits) {
+  const key = `${locale}|${code}|${minorUnits}`;
+  let fmt = MONIES.get(key);
+  if (fmt === undefined) {
+    const digits = { minimumFractionDigits: minorUnits, maximumFractionDigits: minorUnits };
+    // Intl takes any well-formed ISO 4217 code and draws its own symbol, or the
+    // code where it has none. A longer code (a stablecoin's USDC) is no ISO
+    // currency: the amount in the reader's digits, then the code.
+    if (/^[A-Z]{3}$/.test(code)) {
+      fmt = new Intl.NumberFormat(locale, { style: "currency", currency: code, ...digits });
+    } else {
+      const number = new Intl.NumberFormat(locale, digits);
+      fmt = { format: (amount) => `${number.format(amount)} ${code}` };
+    }
+    MONIES.set(key, fmt);
+  }
+  return fmt;
+}
+
+/** Exported so tests can pin the shape without hydrating a screen. A money
+ * column is an integer count of minor units; `currency` is {code, minorUnits}
+ * (currencyOf). The amount reaches Intl as an exact decimal string, never a
+ * double, so an int64 past 2^53 keeps every digit; the locale is the reader's,
+ * and the symbol, its place and the digits are the currency's and the locale's. */
+export function formatMoney(value, currency, ctx) {
+  if (value == null || value === "") return "";
+  const text = String(value).trim();
+  if (currency === undefined || !/^-?(0|[1-9][0-9]*)$/.test(text)) return text;
+  const negative = text.startsWith("-");
+  const units = negative ? text.slice(1) : text;
+  const { code, minorUnits } = currency;
+  const padded = units.padStart(minorUnits + 1, "0");
+  const decimal = minorUnits === 0 ? units : `${padded.slice(0, -minorUnits)}.${padded.slice(-minorUnits)}`;
+  return moneyFormatFor(localeOf(ctx) ?? "en-US", code, minorUnits).format(`${negative ? "-" : ""}${decimal}`);
 }
 
 const LANGUAGE_NAMES = new Map();
@@ -1597,7 +1665,9 @@ function bindText(el, ctx, renderers) {
   };
   if (VALUE_FORMATS.has(format)) {
     write(textAttr.replace(PLACEHOLDERS, (_, expr) =>
-      ({ datetime: formatDatetime, date: formatDate, time: formatTime, number: formatNumber, language: formatLanguage })[format](lookup(expr, ctx), ctx),
+      format === "money"
+        ? formatMoney(lookup(expr, ctx), currencyOf(expr, ctx), ctx)
+        : ({ datetime: formatDatetime, date: formatDate, time: formatTime, number: formatNumber, language: formatLanguage })[format](lookup(expr, ctx), ctx),
     ));
   } else if (format !== undefined && format !== "plain") {
     const render = renderers[format];
