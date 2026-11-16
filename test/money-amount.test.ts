@@ -90,8 +90,10 @@ describe("currencyOf", () => {
   })
 
   it("answers no currency for a row whose sibling is empty or malformed", () => {
-    // A scale past 18 is none the schema admits (#Field.money's minorUnits).
-    for (const held of [null, "", "BRL", "brl_2", "BRL_X", "BRL_19", "BRL_02"]) {
+    // A scale past 18 is none the schema admits (#Field.money's minorUnits);
+    // a code is ISO 4217 or a longer alpha one, never fewer than 3 letters or
+    // one holding a digit.
+    for (const held of [null, "", "BRL", "brl_2", "BRL_X", "BRL_19", "BRL_02", "A_2", "US_2", "US1_2"]) {
       expect(currencyOf("rent", ctx({ rent: "18900", rent_currency: held }))).toBe(undefined)
     }
     expect(currencyOf("rent", ctx({ rent: "1", rent_currency: "BRL_18" }))).toEqual({ code: "BRL", minorUnits: 18 })

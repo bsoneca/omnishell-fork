@@ -1042,7 +1042,7 @@ export function currencyOf(expr, ctx) {
         "a data-select naming columns must name it too",
     );
   }
-  const parts = /^([A-Z][A-Z0-9]*)_(0|[1-9]|1[0-8])$/.exec(row[money.currencyField] ?? "");
+  const parts = /^([A-Z]{3,})_(0|[1-9]|1[0-8])$/.exec(row[money.currencyField] ?? "");
   return parts === null ? undefined : { code: parts[1], minorUnits: Number(parts[2]) };
 }
 
