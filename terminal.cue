@@ -167,6 +167,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		"text-formats": date: {renders: "numeric year, two-digit month and day in the reader's language and timezone", note: "date-only YYYY-MM-DD is a civil date and never shifts; missing values are blank"}
 		"text-formats": time: {renders: "HH:mm in the reader's language and timezone", note: "h23 renders midnight as 00:00; missing values are blank"}
 		"text-formats": number:   {renders: "the number in the reader's own digits and grouping (\"1.234,5\" to a Brazilian)", note: "the column's ASCII spelling is nobody's"}
+		"text-formats": language: {renders: "the base language of a BCP 47 code in the reader's language (\"en-US\" becomes \"English\" to an American, \"inglês\" to a Brazilian)", note: "a value that is no language code, such as a custom language name, is shown as it is; missing values are blank"}
+		"text-formats": money:    {renders: "an integer count of minor units in its currency and the reader's language (\"R$ 189,00\" to a Brazilian, \"R$189.00\" to an American)", note: "the currency is the column's declaration (schema money: {currency, minorUnits}, or {currencyField}, a sibling holding `{code}_{decimals}`), never the attribute's; the amount reaches Intl as an exact decimal"}
 
 
 		// The renderer role, and the terminal's DOM mutation story. A renderer
