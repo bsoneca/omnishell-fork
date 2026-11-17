@@ -29,3 +29,20 @@ Deno.test('worker startup resolves Statechart and preserves role grants', async 
     await Deno.remove(root, { recursive: true })
   }
 })
+
+Deno.test('worker startup compiles a role without Statechart endowment correctly', async () => {
+  const root = await Deno.makeTempDir()
+  try {
+    await Deno.mkdir(`${root}/public/shell/handlers`, { recursive: true })
+    await Deno.writeTextFile(`${root}/public/shell/shell.json`, JSON.stringify({ routes: [{files: {handlers: ['shell/handlers/plain.js']}}], endowments: {'shell/handlers/plain.js': []} }))
+    await Deno.writeTextFile(`${root}/public/shell/handlers/plain.js`, '({ event }) => event')
+    await prepareWorker(`${root}/public`, `${root}/generated`)
+    const startup = await import(`file://${root}/generated/jessie-startup.js`)
+    // The startup module must still work: Statechart is present as a SAFE_ENDOWMENT.
+    assert.equal(typeof startup.SAFE_ENDOWMENTS.Statechart, 'function')
+    const roles = JSON.parse(await Deno.readTextFile(`${root}/generated/roles.json`))
+    assert.deepEqual(roles[0].endowments, [])
+  } finally {
+    await Deno.remove(root, { recursive: true })
+  }
+})

@@ -400,6 +400,22 @@ Deno.test("session lifecycle: passkey refusal, recovery offer, explicit registra
   }
 });
 
+Deno.test("shell.js has no static dependency on vendor/xstate.js", async () => {
+  const src = await Deno.readTextFile(new URL("../interpreter/shell.js", import.meta.url));
+  // shell.js must not statically import cortex-navigation.js or vendor/xstate.js.
+  if (/^import\s.*from\s+["']\.\/cortex-navigation\.js["']/m.test(src)) {
+    throw new Error("shell.js statically imports cortex-navigation.js; xstate is no longer lazy");
+  }
+  if (/^import\s.*from\s+["']\.\/vendor\/xstate\.js["']/m.test(src)) {
+    throw new Error("shell.js statically imports vendor/xstate.js; xstate is no longer lazy");
+  }
+  // Both must only appear as dynamic imports.
+  const dynamicCortex = src.match(/import\(["']\.\/cortex-navigation\.js["']\)/g);
+  if (!dynamicCortex || dynamicCortex.length === 0) {
+    throw new Error("shell.js does not dynamically import cortex-navigation.js");
+  }
+});
+
 Deno.test("session lifecycle: failed provider signout restores previous posture, and stop cancels pending signout", async () => {
   let shouldFail = true;
   let releaseSignOut: (() => void) | null = null;

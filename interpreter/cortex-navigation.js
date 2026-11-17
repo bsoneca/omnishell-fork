@@ -1,4 +1,6 @@
 import { assign, createActor, createMachine, fromCallback, fromPromise } from "./vendor/xstate.js";
+import { authPosture } from "./session-posture.js";
+export { authPosture, SESSION_LIFECYCLE_CHART } from "./session-posture.js";
 
 function plain(value) {
   if (value === null || typeof value === "string" || typeof value === "boolean") return true;
@@ -201,49 +203,9 @@ export function createCortexNavigation({ config, actors }, activate, attach) {
   };
 }
 
-export function authPosture(session, promote = false) {
-  if (!session) return "anonymous";
-  if (session.user?.guest) return promote && !session.committed ? "anonymous" : "guest";
-  return "user";
-}
-
 function sessionOwnerOf(session) {
   return session?.user?.id === undefined ? undefined : String(session.user.id);
 }
-
-export const SESSION_LIFECYCLE_CHART = Object.freeze({
-  id: "session",
-  states: {
-    anonymous: {
-      initial: "idle",
-      states: {
-        idle: {},
-        authenticating: {},
-        registering: {},
-        failed: {},
-      },
-    },
-    guest: {
-      initial: "idle",
-      states: {
-        idle: {},
-        authenticating: {},
-        registering: {},
-        failed: {},
-      },
-    },
-    user: {
-      initial: "idle",
-      states: {
-        idle: {},
-        authenticating: {},
-        registering: {},
-        failed: {},
-      },
-    },
-    signingOut: {},
-  },
-});
 
 export function createSessionLifecycle(options = {}) {
   const {

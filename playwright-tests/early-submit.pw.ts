@@ -17,7 +17,7 @@ const SCREEN_HTML = `<section class="screen" data-screen="join">
   <button type="button" data-on-click="nudge">nudge</button>
 </section>`
 
-const NUDGE = `(state, event) => ({ updates: [] })`
+const NUDGE = `({ context, event }) => ({ updates: [] })`
 
 const PAGE = `<!doctype html>
 <html><head><meta charset="utf-8"><title>early submit harness</title></head>

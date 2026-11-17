@@ -24,8 +24,10 @@ import { compileCatalog } from "./vendor/messages.js";
 import { filesMoved, planRelease } from "./release-plan.js";
 import { replayEarlyGestures, takeEarlyGestures } from "./early-replay.js";
 import { navFeedback } from "./nav-feedback.js";
-import { authPosture, createCortexNavigation, createSessionLifecycle, SESSION_LIFECYCLE_CHART } from "./cortex-navigation.js";
-export { authPosture, createSessionLifecycle, SESSION_LIFECYCLE_CHART } from "./cortex-navigation.js";
+import { authPosture, SESSION_LIFECYCLE_CHART } from "./session-posture.js";
+export { authPosture, SESSION_LIFECYCLE_CHART } from "./session-posture.js";
+// createSessionLifecycle is re-exported via an async wrapper (see bottom of file).
+// cortex-navigation.js (xstate) is loaded lazily when the app's config requires it.
 export { routeAt } from "./fragment.js";
 import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
 import { startLinkPrefetch } from "./link-prefetch.js";
@@ -64,6 +66,23 @@ const dropKeptGuest = (storage = browserStorage()) => {
     storage?.removeItem(KEPT_GUEST);
   } catch { /* storage refused: nothing kept */ }
 };
+
+/** Rewrites a kept-guest record in localStorage when one exists, preserving
+ *  its `keptAt` and updating the rest of the session fields. A guest's
+ *  `committed` flag is set after keepGuest stores it, so this keeps the
+ *  two copies in sync. */
+export function rewriteKeptGuest(session, storage = browserStorage()) {
+  if (!session?.user?.guest) return;
+  try {
+    const raw = storage?.getItem(KEPT_GUEST);
+    if (!raw) return;
+    const kept = JSON.parse(raw);
+    if (kept?.user?.guest !== true) return;
+    const { keptAt } = kept;
+    if (typeof keptAt !== "number") return;
+    storage?.setItem(KEPT_GUEST, JSON.stringify({ ...session, keptAt }));
+  } catch { /* storage refused: nothing rewritten */ }
+}
 
 /** Whether a boolean flag is on, asked over OpenFeature's remote evaluation
  * protocol at the app's own /ofrep/. Fails CLOSED: no answer is off, so an
@@ -631,6 +650,16 @@ function syncAuthDOM(nav, session, opts = {}) {
   }
 }
 
+/** Hands the guest to the auth service before a provider's link is followed, catching failures so the sign-in
+ *  proceeds even when the adoption POST fails. Shared by strip and document-level provider handlers. */
+export async function adoptGuestSafe(cfg, session, fetchFn = globalThis.fetch) {
+  try {
+    await adoptGuest(cfg, await session(), fetchFn);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = null, signOut = null) {
   const box = served?.querySelector(".shell-signin, .shell-provider") ? served : guestBox(document, cfg);
   syncGuestChrome(box, initialSession, { signOut, chrome, cfg });
@@ -654,11 +683,7 @@ function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = n
       link.addEventListener("click", async (event) => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
-        try {
-          await adoptGuest(cfg, await ensureSession());
-        } catch (err) {
-          console.error(err);
-        }
+        await adoptGuestSafe(cfg, () => Promise.resolve(initialSession), globalThis.fetch);
         location.assign(link.href);
       });
     }
@@ -1216,33 +1241,42 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     let nav = null;
     let signOut = null;
     let localizeCurrentStrip = null;
-    const sessionLifecycle = createSessionLifecycle({
-      session,
-      promote: offersGuest(cfg),
-      required: Boolean(cfg.auth?.required),
-      ensureSession: () => session ?? (guestSession ? guestSession : Promise.resolve(null)),
-      passkeySignin: (s) => passkeyCeremony(cfg.auth.service, s?.user?.guest ? s.token : undefined),
-      passkeyRegister: (s) => registerCeremony(cfg.auth.service, s?.user?.guest ? s.token : undefined),
-      signOut: async () => {
-        if (providerHinted()) {
-          const res = await fetch(`${cfg.auth.service}/oidc/signout`, { method: "POST", credentials: "same-origin" });
-          if (!res.ok) throw new Error(`${res.status} POST ${cfg.auth.service}/oidc/signout`);
-        }
-      },
-      hasKnownPasskeys: (rpId) => knownPasskeys(rpId ?? globalThis.location?.hostname).length > 0,
-      isProviderHinted: providerHinted,
-    });
-    if (guestSession) {
+    // cortex-navigation.js (xstate) is loaded lazily: only when the app declares a cortex or
+    // auth. A plain app with neither skips the ~85 kB vendor/xstate.js payload entirely.
+    const needsLifecycle = cfg.cortex !== undefined || cfg.auth !== undefined;
+    const lifecycleModule = needsLifecycle ? await import("./cortex-navigation.js") : null;
+    const createSessionLifecycleFn = lifecycleModule?.createSessionLifecycle ?? null;
+    const sessionLifecycle = createSessionLifecycleFn
+      ? createSessionLifecycleFn({
+          session,
+          promote: offersGuest(cfg),
+          required: Boolean(cfg.auth?.required),
+          ensureSession: () => session ?? (guestSession ? guestSession : Promise.resolve(null)),
+          passkeySignin: (s) => passkeyCeremony(cfg.auth.service, s?.user?.guest ? s.token : undefined),
+          passkeyRegister: (s) => registerCeremony(cfg.auth.service, s?.user?.guest ? s.token : undefined),
+          signOut: async () => {
+            if (providerHinted()) {
+              const res = await fetch(`${cfg.auth.service}/oidc/signout`, { method: "POST", credentials: "same-origin" });
+              if (!res.ok) throw new Error(`${res.status} POST ${cfg.auth.service}/oidc/signout`);
+            }
+          },
+          hasKnownPasskeys: (rpId) => knownPasskeys(rpId ?? globalThis.location?.hostname).length > 0,
+          isProviderHinted: providerHinted,
+        })
+      : null;
+    if (guestSession && sessionLifecycle) {
       guestSession = guestSession.then((s) => {
         if (session === s) sessionLifecycle.setSession(s);
         return s;
       });
     }
     const commitGuest = async () => {
+      if (!sessionLifecycle) return session;
       const s = await sessionLifecycle.commitGuest();
       if (!s?.user?.guest) return s;
       session = s;
       sessionStorage.setItem("pronto-token", JSON.stringify(s));
+      rewriteKeptGuest(s);
       syncAuthDOM(nav, s, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
       localizeCurrentStrip?.();
       return s;
@@ -1381,6 +1415,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       if (outcome.mode === "in-place") {
         session = outcome.session;
         sessionStorage.setItem("pronto-token", JSON.stringify(session));
+        rewriteKeptGuest(session);
         syncAuthDOM(nav, session, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
         return;
       }
@@ -1511,6 +1546,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       const next = outcome.session;
       if (!outcome.sameOwner) sessionStorage.removeItem(recoveryKey);
       sessionStorage.setItem("pronto-token", JSON.stringify(next));
+      if (next?.user?.guest !== true) dropKeptGuest();
       if (outcome.transitionMode === "in-place") {
         session = next;
         if (nav) {
@@ -1525,11 +1561,14 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       }
       location.reload();
     };
-    document.addEventListener("click", (e) => {
+    document.addEventListener("click", async (e) => {
       const providerEl = e.target?.closest?.("[data-auth-provider]");
       if (providerEl && cfg.auth?.service) {
         if (providerEl.localName !== "label") e.preventDefault();
-        if (sessionLifecycle.busy()) return;
+        if (sessionLifecycle?.busy()) return;
+        if (cfg.auth?.adoptGuest) {
+          await adoptGuestSafe(cfg, () => session ?? guestSession ?? Promise.resolve(null), globalThis.fetch);
+        }
         const provider = providerEl.dataset.authProvider;
         const here = `${location.pathname ?? "/"}${location.search ?? ""}${location.hash ?? ""}`;
         location.href = providerHref(cfg.auth.service, provider, here);
@@ -1966,10 +2005,12 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         signal?.removeEventListener("abort", cancel);
       }
     };
-    const cortex = cfg.cortex === undefined ? undefined : createCortexNavigation(cfg.cortex, (request, { signal }) => {
-      if (currentRoute().route.screen !== request.screen || location.pathname !== request.pathname || location.search !== request.search) throw new ProgramError("Cortex navigation no longer matches the requested route");
-      return activate(request.navigationType, signal);
-    }, (binding, spec) => rowAttachments.attach(binding, spec));
+    const cortex = (cfg.cortex !== undefined && lifecycleModule?.createCortexNavigation)
+      ? lifecycleModule.createCortexNavigation(cfg.cortex, (request, { signal }) => {
+          if (currentRoute().route.screen !== request.screen || location.pathname !== request.pathname || location.search !== request.search) throw new ProgramError("Cortex navigation no longer matches the requested route");
+          return activate(request.navigationType, signal);
+        }, (binding, spec) => rowAttachments.attach(binding, spec))
+      : undefined;
     const show = (navigationType = "push") => {
       if (!cortex) return activate(navigationType);
       if (current) current.mutationActive = false;
@@ -2232,4 +2273,12 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     banner(err);
     throw err;
   }
+}
+
+// createSessionLifecycle is lazily loaded from cortex-navigation.js; export an
+// async wrapper so public imports (tests) still get it without a static xstate
+// dependency.
+export async function createSessionLifecycle(...args) {
+  const mod = await import("./cortex-navigation.js");
+  return mod.createSessionLifecycle(...args);
 }

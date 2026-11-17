@@ -1,5 +1,5 @@
 import { expect } from "@test/harness"
-import { adoptGuest } from "../interpreter/shell.js"
+import { adoptGuest, adoptGuestSafe } from "../interpreter/shell.js"
 
 // A provider's sign-in leaves the page, so the account it makes is a new one. Where the app's auth names a flag in
 // adoptGuest and it is on, the guest this tab holds is handed to the auth service first, which keeps it for the
@@ -47,4 +47,29 @@ Deno.test("a refusal or a failure from the auth service is the sign-in as it alw
       ? Promise.resolve(new Response(JSON.stringify({ value: true })))
       : Promise.reject(new TypeError("fetch failed"))
   expect(await adoptGuest(cfg, guest, down as typeof fetch)).toBe(false)
+})
+
+Deno.test("adoptGuestSafe catches errors from the adoption POST, so the provider sign-in proceeds", async () => {
+  // A session getter that resolves to the guest.
+  const session = () => Promise.resolve(guest)
+  let asked = false
+  // fetch that fails at the adopt endpoint but answers the flag check.
+  const failing = (url: RequestInfo | URL) => {
+    asked = true
+    if (String(url).startsWith("/ofrep/")) return Promise.resolve(new Response(JSON.stringify({ value: true })))
+    return Promise.reject(new TypeError("fetch failed"))
+  }
+  // adoptGuestSafe must not throw: the sign-in link follows regardless.
+  await adoptGuestSafe(cfg, session, failing as typeof fetch)
+  expect(asked).toBe(true)
+})
+
+Deno.test("adoptGuestSafe hands the guest over with its bearer when the flag is on", async () => {
+  const f = service(true)
+  await adoptGuestSafe(cfg, () => Promise.resolve(guest), f)
+  expect(f.asked.map((a) => a.url)).toEqual(["/ofrep/v1/evaluate/flags/google_adopts_guest", "/auth/oidc/adopt"])
+  const init = f.asked[1].init!
+  expect(init.method).toBe("POST")
+  expect(init.credentials).toBe("same-origin")
+  expect((init.headers as Record<string, string>).authorization).toBe("Bearer g.t.s")
 })
