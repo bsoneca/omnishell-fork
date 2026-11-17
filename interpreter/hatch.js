@@ -21,6 +21,7 @@ import { mountWorkerUnit } from "./hatch-worker.js";
 export const PROPS = "pronto:props";
 export const READY = "pronto:ready";
 export const EVENT = "pronto:event";
+export const CAMERA = "pronto:camera";
 
 export const SRC_SCHEMES = new Set(["http:", "https:"]);
 
@@ -38,19 +39,20 @@ export const SRC_SCHEMES = new Set(["http:", "https:"]);
 //                   the provider's origin — no more authority than a link in
 //                   the article already has.
 //
-// allow-same-origin is refused, permanently and without a widening path. With
-// it the frame shares this origin: it reads our storage and our cookies, and
-// for a same-origin src it reaches through window.parent into the screen's own
-// DOM. A sandbox carrying it is theatre. The top-navigation tokens are refused
-// on the same footing — an embed that can replace the page the reader is on
-// has taken the app away from them.
+// allow-same-origin is refused on the app's own origin: with it the frame
+// shares this origin, reads our storage and our cookies, and reaches through
+// window.parent into the screen's own DOM. Only a unit seated on a dedicated
+// subdomain (`unit.subdomain`) takes SUBDOMAIN_SANDBOX, where its origin is
+// distinct from the app's and carries a real origin for embedded providers.
 const SANDBOX = "allow-scripts allow-popups allow-popups-to-escape-sandbox";
+const SUBDOMAIN_SANDBOX = "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox";
+const SUBDOMAIN_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 
 // The permissions a frame may be delegated, each only to a unit that declares
 // it (shell.yaml `units.<name>.grants`), as the frame's `allow`. A grant is the
 // reader's to answer: the browser prompts in this app's name, and the unit sees
 // a denial as the API's own error. terminal.cue publishes the same list.
-export const REALM_GRANTS = Object.freeze(["geolocation"]);
+export const REALM_GRANTS = Object.freeze(["geolocation", "camera", "payment"]);
 
 // A sandboxed frame without allow-same-origin has an opaque origin, and an
 // opaque origin serialises as the string "null" — so this, not the src's
@@ -129,6 +131,22 @@ export function rebuildDetail(shape, value) {
 export const SELF_UNIT = "pronto-unit";
 export function selfSrc(name, href = globalThis.location.href) {
   return `${href.split("#")[0]}#${SELF_UNIT}=${encodeURIComponent(name)}`;
+}
+
+// A realm unit seated on its own subdomain (`unit.subdomain`) resolves its
+// path against the app's base and prefixes the subdomain label to the host, so
+// the frame runs at `https://<subdomain>.<host>` rather than the app's origin.
+export function subdomainSrc(subdomain, path, base = globalThis.location.href) {
+  if (typeof subdomain !== "string" || !SUBDOMAIN_LABEL.test(subdomain)) {
+    throw new ProgramError(`hatch subdomain "${subdomain}" is not a valid DNS label`);
+  }
+  const url = new URL(path, base);
+  if (url.hostname === "127.0.0.1" || url.hostname === "[::1]") {
+    url.hostname = `${subdomain}.localhost`;
+  } else {
+    url.hostname = `${subdomain}.${url.hostname}`;
+  }
+  return url.href;
 }
 
 // The seats, by the ECMA-262 name of what each gives the unit: a realm is an
@@ -266,12 +284,25 @@ function mountFrameUnit(root, { unit, src, onEvent }) {
   const url = new URL(src);
   if (!SRC_SCHEMES.has(url.protocol)) throw new ProgramError(`hatch src scheme "${url.protocol}" is not allowed`);
 
+  const onSubdomain = unit.subdomain !== undefined && !unit.self;
+  if (onSubdomain) {
+    if (typeof unit.subdomain !== "string" || !SUBDOMAIN_LABEL.test(unit.subdomain)) {
+      throw new ProgramError(`hatch "${src}" has invalid subdomain "${unit.subdomain}"`);
+    }
+    if (url.hostname !== `${unit.subdomain}.localhost` && !url.hostname.startsWith(`${unit.subdomain}.`)) {
+      throw new ProgramError(`hatch "${src}" is not on subdomain "${unit.subdomain}"`);
+    }
+    if (globalThis.location?.origin && url.origin === globalThis.location.origin) {
+      throw new ProgramError(`hatch "${src}" shares the app's origin and cannot take allow-same-origin`);
+    }
+  }
+
   const grants = unit.grants ?? [];
   for (const g of grants) {
     if (!REALM_GRANTS.includes(g)) throw new ProgramError(`hatch "${src}" asks for "${g}", which the realm seat does not grant`);
   }
   const frame = document.createElement("iframe");
-  frame.setAttribute("sandbox", SANDBOX);
+  frame.setAttribute("sandbox", onSubdomain ? SUBDOMAIN_SANDBOX : SANDBOX);
   if (grants.length) frame.setAttribute("allow", grants.join("; "));
   frame.setAttribute("src", url.href);
   // An article carries several of these and none of them is what the reader
@@ -286,13 +317,147 @@ function mountFrameUnit(root, { unit, src, onEvent }) {
 
   let ready = false;
   let latest = {};
+  const expectedOrigin = onSubdomain ? url.origin : OPAQUE_ORIGIN;
+  const targetOrigin = onSubdomain ? url.origin : "*";
+  let cameraEpoch = 0;
+  let cameraStream = null;
+  let cameraVideo = null;
+  let cameraRaf = 0;
+  let cameraStreaming = false;
+  let cameraStarting = false;
+  let cameraFacingMode = "environment";
+  let cameraResumeMode = null;
+
+  const stopCamera = ({ notify = false } = {}) => {
+    cameraEpoch += 1;
+    const wasActive = cameraStreaming || cameraStream !== null || cameraStarting;
+    cameraStreaming = false;
+    cameraStarting = false;
+    if (cameraRaf) {
+      globalThis.cancelAnimationFrame?.(cameraRaf);
+      cameraRaf = 0;
+    }
+    if (cameraStream) {
+      for (const t of cameraStream.getTracks?.() ?? []) t.stop();
+      cameraStream = null;
+    }
+    if (cameraVideo) {
+      cameraVideo.srcObject = null;
+      cameraVideo = null;
+    }
+    if (notify && wasActive) {
+      frame.contentWindow?.postMessage({ type: CAMERA, status: "stopped" }, targetOrigin);
+    }
+  };
+
+  // Chromium refuses navigator.mediaDevices.getUserMedia inside an opaque
+  // ("null") origin even when the iframe carries allow="camera". When the unit
+  // declares "camera" in grants, the seat opens the stream in this origin and
+  // transfers ImageBitmap frames into the sandboxed realm.
+  const startCamera = async (facingMode) => {
+    cameraResumeMode = null;
+    stopCamera();
+    const epoch = cameraEpoch;
+    const getUserMedia = globalThis.navigator?.mediaDevices?.getUserMedia;
+    if (typeof getUserMedia !== "function") {
+      frame.contentWindow?.postMessage({ type: CAMERA, status: "error", name: "NotSupportedError" }, targetOrigin);
+      return;
+    }
+    const mode = facingMode === "user" ? "user" : "environment";
+    cameraFacingMode = mode;
+    cameraStarting = true;
+    let stream;
+    try {
+      stream = await getUserMedia.call(globalThis.navigator.mediaDevices, {
+        video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+    } catch (err) {
+      if (epoch !== cameraEpoch) return;
+      cameraStarting = false;
+      frame.contentWindow?.postMessage({ type: CAMERA, status: "error", name: err?.name || "Error" }, targetOrigin);
+      return;
+    }
+    if (epoch !== cameraEpoch) {
+      for (const t of stream.getTracks?.() ?? []) t.stop();
+      return;
+    }
+    cameraStarting = false;
+    cameraStream = stream;
+    const video = document.createElement("video");
+    video.setAttribute("playsinline", "");
+    video.muted = true;
+    video.srcObject = stream;
+    cameraVideo = video;
+    if (typeof video.play === "function") {
+      try {
+        await video.play();
+      } catch (err) {
+        if (epoch === cameraEpoch) {
+          stopCamera();
+          frame.contentWindow?.postMessage({ type: CAMERA, status: "error", name: err?.name || "NotAllowedError" }, targetOrigin);
+        } else {
+          for (const t of stream.getTracks?.() ?? []) t.stop();
+        }
+        return;
+      }
+    }
+    if (epoch !== cameraEpoch || cameraStream !== stream) {
+      if (cameraStream !== stream) {
+        for (const t of stream.getTracks?.() ?? []) t.stop();
+      }
+      return;
+    }
+    cameraStreaming = true;
+    const w = video.videoWidth || 640;
+    const h = video.videoHeight || 480;
+    frame.contentWindow?.postMessage({ type: CAMERA, status: "streaming", width: w, height: h }, targetOrigin);
+    const pump = async () => {
+      if (!cameraStreaming || cameraVideo !== video) return;
+      if (typeof globalThis.createImageBitmap === "function" && (video.readyState ?? 2) >= 2) {
+        try {
+          const bitmap = await globalThis.createImageBitmap(video);
+          if (!cameraStreaming || cameraVideo !== video) {
+            bitmap.close?.();
+            return;
+          }
+          frame.contentWindow?.postMessage(
+            { type: CAMERA, status: "frame", bitmap, width: video.videoWidth || w, height: video.videoHeight || h },
+            targetOrigin,
+            [bitmap],
+          );
+        } catch {
+          // Next animation frame retries once the video decoder has a frame.
+        }
+      }
+      if (cameraStreaming && cameraVideo === video && typeof globalThis.requestAnimationFrame === "function") {
+        cameraRaf = globalThis.requestAnimationFrame(pump);
+      }
+    };
+    if (typeof globalThis.requestAnimationFrame === "function") {
+      cameraRaf = globalThis.requestAnimationFrame(pump);
+    }
+  };
+
+  const onVisibility = () => {
+    if (document.hidden) {
+      if (cameraStreaming || cameraStream !== null || cameraStarting) {
+        cameraResumeMode = cameraFacingMode;
+        stopCamera({ notify: true });
+      }
+    } else if (cameraResumeMode !== null) {
+      const mode = cameraResumeMode;
+      cameraResumeMode = null;
+      startCamera(mode);
+    }
+  };
+  if (grants.includes("camera")) document.addEventListener?.("visibilitychange", onVisibility);
 
   // targetOrigin cannot name an opaque origin, so "*" is the only reachable
   // value — meaning whatever document is in the frame receives these props. A
-  // unit that navigated itself elsewhere would receive them too, which is why
-  // a hatch is never fed anything secret.
+  // subdomain realm has a named origin of its own and is targeted at it.
   const deliver = () => {
-    if (ready) frame.contentWindow?.postMessage({ type: PROPS, props: latest }, "*");
+    if (ready) frame.contentWindow?.postMessage({ type: PROPS, props: latest }, targetOrigin);
   };
 
   const onMessage = (e) => {
@@ -302,12 +467,21 @@ function mountFrameUnit(root, { unit, src, onEvent }) {
     // alone identifies nobody — this identity check is what makes the frame
     // the only sender that can reach this bridge.
     if (e.source !== frame.contentWindow || e.source == null) return;
-    if (e.origin !== OPAQUE_ORIGIN) return;
+    if (e.origin !== expectedOrigin) return;
     const message = e.data;
     if (message === null || typeof message !== "object") return;
     if (message.type === READY) {
       ready = true;
       deliver();
+      return;
+    }
+    if (message.type === CAMERA) {
+      if (!grants.includes("camera")) return;
+      if (message.action === "start") startCamera(message.facingMode);
+      else if (message.action === "stop") {
+        cameraResumeMode = null;
+        stopCamera();
+      }
       return;
     }
     if (message.type !== EVENT) return;
@@ -329,6 +503,9 @@ function mountFrameUnit(root, { unit, src, onEvent }) {
       deliver();
     },
     destroy() {
+      cameraResumeMode = null;
+      stopCamera();
+      document.removeEventListener?.("visibilitychange", onVisibility);
       globalThis.removeEventListener("message", onMessage);
       frame.remove();
     },

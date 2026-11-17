@@ -7,7 +7,7 @@
 import { describe, expect, it } from "@test/harness"
 import { mountScreen } from "./screen-harness.ts"
 
-const REDUCE = `(state, event) => {
+const REDUCE = `({ context: state, event }) => {
   const n = Number(state.rows.tally?.[0]?.n ?? 0);
   return { updates: [{ op: "patch", entity: "tally", id: "t", row: { n: n + 1, last: event.from ?? "" } }] };
 }`

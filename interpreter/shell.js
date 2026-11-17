@@ -24,6 +24,10 @@ import { compileCatalog } from "./vendor/messages.js";
 import { filesMoved, planRelease } from "./release-plan.js";
 import { replayEarlyGestures, takeEarlyGestures } from "./early-replay.js";
 import { navFeedback } from "./nav-feedback.js";
+// The session lifecycle runs in every app (guest, sign-in, sign-out), so cortex-navigation.js loads statically;
+// row-attachments.js still loads only for an app that declares a cortex (PRONTO-134).
+import { authPosture, createSessionLifecycle } from "./cortex-navigation.js";
+export { authPosture, createSessionLifecycle, SESSION_LIFECYCLE_CHART } from "./cortex-navigation.js";
 export { routeAt } from "./fragment.js";
 import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
 import { startLinkPrefetch } from "./link-prefetch.js";
@@ -329,6 +333,33 @@ async function postJson(url, body, token) {
   return res.json();
 }
 
+const passkeyStoreKey = (rpId) => `pronto-passkey-ids:${rpId || "default"}`;
+const rpIdOf = (options) => options?.rpId ?? options?.rp?.id ?? globalThis.location?.hostname;
+function knownPasskeys(rpId) {
+  try {
+    const raw = globalThis.localStorage?.getItem(passkeyStoreKey(rpId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string" && id.length > 0) : [];
+  } catch {
+    return [];
+  }
+}
+function rememberPasskey(rpId, credId) {
+  if (!rpId || !credId) return;
+  try {
+    const next = [...new Set([...knownPasskeys(rpId), credId])];
+    globalThis.localStorage?.setItem(passkeyStoreKey(rpId), JSON.stringify(next));
+  } catch {}
+}
+function forgetPasskey(rpId, credId) {
+  if (!rpId || !credId) return;
+  try {
+    const next = knownPasskeys(rpId).filter((id) => id !== credId);
+    if (next.length === 0) globalThis.localStorage?.removeItem(passkeyStoreKey(rpId));
+    else globalThis.localStorage?.setItem(passkeyStoreKey(rpId), JSON.stringify(next));
+  } catch {}
+}
+
 // Both ceremonies are usernameless by terminal doctrine (one tap; identity
 // is generated server-side): POST {service}/<kind>/start {} → the WebAuthn
 // options object flat, plus `state` (the server's stateless challenge JWT,
@@ -337,18 +368,32 @@ async function postJson(url, body, token) {
 // gives that session's identity the passkey rather than minting a new one.
 async function registerCeremony(service, token) {
   const { state, ...options } = await postJson(`${service}/register/start`, {}, token);
-  const cred = await navigator.credentials.create({
-    publicKey: {
-      ...options,
-      challenge: bufFromB64u(options.challenge),
-      user: { ...options.user, id: bufFromB64u(options.user.id) },
-      excludeCredentials: (options.excludeCredentials ?? []).map((c) => ({
-        ...c,
-        id: bufFromB64u(c.id),
-      })),
-    },
-  });
-  return postJson(`${service}/register/verify`, {
+  const rpId = rpIdOf(options);
+  const seen = new Set();
+  const excluded = [
+    ...(options.excludeCredentials ?? []),
+    ...knownPasskeys(rpId).map((id) => ({ id, type: "public-key" })),
+  ].filter((c) => c?.id && !seen.has(c.id) && seen.add(c.id));
+  let cred;
+  try {
+    cred = await navigator.credentials.create({
+      publicKey: {
+        ...options,
+        challenge: bufFromB64u(options.challenge),
+        user: { ...options.user, id: bufFromB64u(options.user.id) },
+        excludeCredentials: excluded.map((c) => ({
+          ...c,
+          id: bufFromB64u(c.id),
+        })),
+      },
+    });
+  } catch (err) {
+    if (err?.name === "InvalidStateError") {
+      for (const c of excluded) rememberPasskey(rpId, c.id);
+    }
+    throw err;
+  }
+  const session = await postJson(`${service}/register/verify`, {
     state,
     response: {
       id: cred.id,
@@ -363,47 +408,84 @@ async function registerCeremony(service, token) {
       },
     },
   });
+  rememberPasskey(rpId, cred.id);
+  return session;
 }
 
 async function loginCeremony(service) {
   const { state, ...options } = await postJson(`${service}/login/start`, {});
-  const cred = await navigator.credentials.get({
-    publicKey: {
-      ...options,
-      challenge: bufFromB64u(options.challenge),
-      allowCredentials: (options.allowCredentials ?? []).map((c) => ({
-        ...c,
-        id: bufFromB64u(c.id),
-      })),
-    },
-  });
-  return postJson(`${service}/login/verify`, {
-    state,
-    response: {
-      id: cred.id,
-      rawId: b64uFromBuf(cred.rawId),
-      type: cred.type,
-      clientExtensionResults: cred.getClientExtensionResults(),
-      response: {
-        clientDataJSON: b64uFromBuf(cred.response.clientDataJSON),
-        authenticatorData: b64uFromBuf(cred.response.authenticatorData),
-        signature: b64uFromBuf(cred.response.signature),
-        userHandle: cred.response.userHandle ? b64uFromBuf(cred.response.userHandle) : undefined,
+  const rpId = rpIdOf(options);
+  let cred;
+  try {
+    cred = await navigator.credentials.get({
+      publicKey: {
+        ...options,
+        challenge: bufFromB64u(options.challenge),
+        allowCredentials: (options.allowCredentials ?? []).map((c) => ({
+          ...c,
+          id: bufFromB64u(c.id),
+        })),
       },
-    },
-  });
+    });
+  } catch (err) {
+    if (err && typeof err === "object") {
+      err.rpId = rpId;
+    }
+    throw err;
+  }
+  try {
+    const session = await postJson(`${service}/login/verify`, {
+      state,
+      response: {
+        id: cred.id,
+        rawId: b64uFromBuf(cred.rawId),
+        type: cred.type,
+        clientExtensionResults: cred.getClientExtensionResults(),
+        response: {
+          clientDataJSON: b64uFromBuf(cred.response.clientDataJSON),
+          authenticatorData: b64uFromBuf(cred.response.authenticatorData),
+          signature: b64uFromBuf(cred.response.signature),
+          userHandle: cred.response.userHandle ? b64uFromBuf(cred.response.userHandle) : undefined,
+        },
+      },
+    });
+    rememberPasskey(rpId, cred.id);
+    return session;
+  } catch (err) {
+    const msg = String(err?.message ?? "");
+    if (msg.startsWith("401 ") && (msg.includes('"unknownCredential":true') || msg.includes("unknown credential"))) {
+      try {
+        await globalThis.PublicKeyCredential?.signalUnknownCredential?.({
+          rpId,
+          credentialId: cred.id,
+        });
+      } catch {}
+      forgetPasskey(rpId, cred.id);
+      if (err && typeof err === "object") {
+        err.unknownCredential = true;
+        err.rpId = rpId;
+      }
+    }
+    throw err;
+  }
 }
 
-// Register and login are one gesture: attempt the discoverable get; when no
-// resident credential materializes (NotAllowedError covers both "none" and
-// "canceled" — the platform does not distinguish, by design), create one. Any
-// other failure is the login's own and is not a reason to mint a passkey.
+// Register and login are one gesture when no passkey exists for this domain:
+// attempt the discoverable get; when no resident credential materializes
+// (NotAllowedError) and no valid passkey is remembered for this rpId, create
+// one. A server-refused login (401) prunes the unknown credential above and
+// stays refused until a passkey is explicitly created. Once a valid passkey is
+// known for this rpId, canceling get() stays a cancel rather than minting a
+// duplicate passkey.
 async function passkeyCeremony(service, token) {
   try {
     return await loginCeremony(service);
   } catch (err) {
-    if (err?.name !== "NotAllowedError") throw err;
-    return registerCeremony(service, token);
+    const rpId = err?.rpId ?? globalThis.location?.hostname;
+    if (err?.name === "NotAllowedError" && knownPasskeys(rpId).length === 0) {
+      return registerCeremony(service, token);
+    }
+    throw err;
   }
 }
 
@@ -469,7 +551,9 @@ function renderLogin(mount, cfg, chrome) {
     wrap.querySelector(".login-guest").addEventListener("click", async () => {
       error.setAttribute("hidden", "");
       try {
-        resolve(await postJson(`${cfg.auth.service}/guest`, {}));
+        const s = await postJson(`${cfg.auth.service}/guest`, {});
+        s.committed = true;
+        resolve(s);
       } catch (err) {
         console.error(err);
         error.textContent = chrome("chrome_signin_failed");
@@ -479,8 +563,90 @@ function renderLogin(mount, cfg, chrome) {
   });
 }
 
-function renderPromote(ensureSession, cfg, chrome, served = null) {
+function syncGuestChrome(box, session, { signOut, chrome, cfg } = {}) {
+  const signIn = box.querySelector(".shell-signin");
+  if (session?.user?.guest && session.committed) {
+    box.dataset.auth = "guest";
+    if (document.body) document.body.dataset.auth = "guest";
+    if (signIn) signIn.hidden = true;
+    let who = box.querySelector(":scope > .shell-who");
+    if (!who) {
+      who = document.createElement("span");
+      who.className = "shell-who";
+      who.dataset.guest = "";
+      const name = document.createElement("span");
+      name.className = "name";
+      const handle = document.createElement("span");
+      handle.className = "handle";
+      who.append(name, handle);
+      box.prepend(who);
+    }
+    // The provider's name over the handle, when the sign-in vouched for one.
+    const name = who.querySelector(".name");
+    if (name) name.textContent = session.user.name ?? "";
+    const handle = who.querySelector(".handle");
+    if (handle) handle.textContent = session.user.name ? "" : (session.user.handle ?? "");
+    let out = box.querySelector(":scope > .shell-signout");
+    if (!out && signOut) {
+      out = document.createElement("a");
+      out.className = "shell-signout";
+      out.href = "#";
+      out.textContent = chrome?.("chrome_signout", document.documentElement.lang || cfg?.i18n?.default) ?? "";
+      out.addEventListener("click", (e) => {
+        e.preventDefault();
+        signOut();
+      });
+      box.append(out);
+    }
+  } else {
+    box.dataset.auth = "anonymous";
+    if (document.body) document.body.dataset.auth = "anonymous";
+    if (signIn) signIn.hidden = false;
+    box.querySelector(":scope > .shell-who")?.remove();
+    box.querySelector(":scope > .shell-signout")?.remove();
+  }
+}
+
+function syncAuthDOM(nav, session, opts = {}) {
+  const promote = offersGuest(opts.cfg);
+  if (opts.lifecycle && opts.lifecycle.session() !== session) {
+    opts.lifecycle.setSession(session);
+  }
+  const auth = opts.lifecycle ? opts.lifecycle.posture() : authPosture(session, promote);
+  if (document.body) document.body.dataset.auth = auth;
+  const box = nav?.querySelector(":scope > .shell-me");
+  if (box && auth !== "user" && promote) syncGuestChrome(box, session, opts);
+  for (const el of document.querySelectorAll("[data-auth-field]")) {
+    const field = el.dataset.authField;
+    if (auth === "anonymous") {
+      delete el._prontoAuthOverride;
+      if (el._prontoAuthAnonymous !== undefined) {
+        el.textContent = el._prontoAuthAnonymous;
+        delete el._prontoAuthAnonymous;
+      }
+    } else if (field === "handle" || field === "name") {
+      if (el._prontoAuthAnonymous === undefined) el._prontoAuthAnonymous = el.textContent ?? "";
+      const val = field === "name" ? (session?.user?.name ?? session?.user?.handle ?? "") : (session?.user?.handle ?? "");
+      el._prontoAuthOverride = val;
+      el.textContent = val;
+    }
+  }
+}
+
+function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = null, signOut = null, ensureSession = null) {
   const box = served?.querySelector(".shell-signin, .shell-provider") ? served : guestBox(document, cfg);
+  syncGuestChrome(box, initialSession, { signOut, chrome, cfg });
+  const openModalIfPresent = (e) => {
+    const trigger = document.querySelector(".shell-screen:not([hidden]) [data-auth-trigger], .shell-screen:not([hidden]) #btn-top-login");
+    if (!trigger) return false;
+    e.preventDefault();
+    if (typeof trigger.click === "function") trigger.click();
+    else trigger.dispatchEvent(new (document.defaultView?.Event ?? Event)("click", { bubbles: true }));
+    return true;
+  };
+  box.addEventListener("click", (e) => {
+    if (e.target?.closest?.(".shell-who[data-guest]")) openModalIfPresent(e);
+  });
   const signIn = box.querySelector(".shell-signin");
   const create = box.querySelector(".shell-register");
   // A provider's way in is a link that leaves the page: where the app asks it (auth.adoptGuest), the guest is handed to
@@ -491,7 +657,7 @@ function renderPromote(ensureSession, cfg, chrome, served = null) {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
         try {
-          await adoptGuest(cfg, await ensureSession());
+          await adoptGuest(cfg, lifecycle?.session() ?? initialSession ?? await ensureSession?.());
         } catch (err) {
           console.error(err);
         }
@@ -504,40 +670,46 @@ function renderPromote(ensureSession, cfg, chrome, served = null) {
     create?.remove();
     return box;
   }
-  const authenticate = async (button, ceremony) => {
+  const authenticate = async (button, kind) => {
+    if (lifecycle.busy()) return;
     if (signIn) signIn.disabled = true;
     if (create) create.disabled = true;
-    let current;
-    let next;
+    let outcome;
     try {
-      current = await ensureSession();
-      next = await ceremony(current);
-    } catch (err) {
-      console.error(err);
-      button.dataset.key = "chrome_passkey_failed";
-      button.textContent = chrome(button.dataset.key, document.documentElement.lang);
-      return;
+      outcome = kind === "register"
+        ? await lifecycle.registerPasskey({ origin: "strip" })
+        : await lifecycle.signInPasskey({ origin: "strip" });
     } finally {
       if (signIn) signIn.disabled = false;
       if (create) create.disabled = false;
     }
-    if (sessionOwner(next) !== sessionOwner(current)) sessionStorage.removeItem(recoveryKey);
-    sessionStorage.setItem("pronto-token", JSON.stringify(next));
-    if (next?.user?.guest !== true) dropKeptGuest();
+    if (!outcome || outcome.status === "busy" || outcome.status === "stopped") return;
+    if (outcome.status === "failed") {
+      console.error(outcome.error);
+      button.dataset.key = "chrome_passkey_failed";
+      button.textContent = chrome(button.dataset.key, document.documentElement.lang);
+      return;
+    }
+    if (!outcome.sameOwner) sessionStorage.removeItem(recoveryKey);
+    sessionStorage.setItem("pronto-token", JSON.stringify(outcome.session));
+    if (outcome.session?.user?.guest !== true) dropKeptGuest();
     location.reload();
   };
-  signIn?.addEventListener("click", () => authenticate(signIn, (session) => passkeyCeremony(cfg.auth.service, session.token)));
-  create?.addEventListener("click", () => authenticate(create, (session) => registerCeremony(cfg.auth.service, session.token)));
+  signIn?.addEventListener("click", (e) => {
+    if (openModalIfPresent(e)) return;
+    authenticate(signIn, "signin");
+  });
+  create?.addEventListener("click", () => authenticate(create, "register"));
   return box;
 }
-function renderSession(session, cfg, store, signOut, chrome, served = null) {
-  // A guest has nothing to sign out of and a way in to gain: a passkey's one
-  // gesture signs in to the passkey's account where the device has one, and
-  // otherwise makes one of this guest, keeping what it wrote; a provider's
-  // signs in as the person it links. A served document's strip already holds
-  // that box (document.js), and it is the one bound.
+function renderSession(session, cfg, store, signOut, chrome, served = null, lifecycle = null) {
+  // A guest keeps a way in to gain: a passkey's one gesture signs in to the
+  // passkey's account where the device has one, and otherwise makes one of
+  // this guest, keeping what it wrote; a provider's signs in as the person it
+  // links. A served document's strip already holds that box (document.js), and
+  // it is the one bound.
   if (session.user.guest && offersGuest(cfg)) {
-    return renderPromote(() => Promise.resolve(session), cfg, chrome, served);
+    return renderPromote(lifecycle, cfg, chrome, served, session, signOut);
   }
 
   const self = cfg.auth?.self;
@@ -555,13 +727,17 @@ function renderSession(session, cfg, store, signOut, chrome, served = null) {
   }
   const name = document.createElement("span");
   name.className = "name";
+  // The provider's name over the handle, when the sign-in vouched for one.
+  name.textContent = session.user.name ?? "";
   const handle = document.createElement("span");
   handle.className = "handle";
-  handle.textContent = session.user.handle;
+  handle.textContent = session.user.name ? "" : session.user.handle;
   who.append(name, handle);
 
   const box = document.createElement("span");
   box.className = "shell-me";
+  box.dataset.auth = session.user.guest ? "guest" : "user";
+  if (document.body) document.body.dataset.auth = box.dataset.auth;
   const out = document.createElement("a");
   out.className = "shell-signout";
   out.href = "#";
@@ -659,12 +835,18 @@ function catalogues(appBase, i18n) {
 // answer, and fetches what nothing reads.
 export function installModalInert(document) {
   const modalInert = new Map();
+  const esc = document.defaultView?.CSS?.escape ?? ((s) => String(s).replace(/["\\]/g, "\\$&"));
   const syncModalInert = () => {
     const modal = [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')]
       .find((el) => el.checkVisibility({ checkVisibilityCSS: true, contentVisibilityAuto: true }) && el.getClientRects().length);
     const next = new Set();
     for (let node = modal; node?.parentElement; node = node.parentElement) {
-      for (const sibling of node.parentElement.children) if (sibling !== node) next.add(sibling);
+      for (const sibling of node.parentElement.children) {
+        if (sibling === node) continue;
+        if (sibling.localName === "input" && (sibling.type === "checkbox" || sibling.type === "radio") && sibling.id &&
+            modal.querySelector(`label[for="${esc(sibling.id)}"]`)) continue;
+        next.add(sibling);
+      }
     }
     for (const [el, wasInert] of modalInert) if (!next.has(el)) {
       el.inert = wasInert;
@@ -679,6 +861,7 @@ export function installModalInert(document) {
     subtree: true, childList: true, attributes: true,
     attributeFilter: ["data-status", "hidden", "class", "style", "aria-modal"],
   });
+  document.addEventListener("change", syncModalInert, true);
   syncModalInert();
 }
 
@@ -782,7 +965,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
           : field.value !== field.defaultValue);
       if (changed) editedFields.add(field);
     }
-    for (const type of ["input", "change", "keydown", "pointerdown"]) {
+    for (const type of ["input", "change", "keydown", "pointerdown", "click", "submit"]) {
       document.addEventListener(type, () => { gesture += 1; }, true);
     }
   }
@@ -1035,6 +1218,41 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       }
     }
 
+    let nav = null;
+    let signOut = null;
+    let localizeCurrentStrip = null;
+    const sessionLifecycle = createSessionLifecycle({
+      session,
+      promote: offersGuest(cfg),
+      required: Boolean(cfg.auth?.required),
+      ensureSession: () => session ?? (guestSession ? guestSession : Promise.resolve(null)),
+      passkeySignin: (s) => passkeyCeremony(cfg.auth.service, s?.user?.guest ? s.token : undefined),
+      passkeyRegister: (s) => registerCeremony(cfg.auth.service, s?.user?.guest ? s.token : undefined),
+      signOut: async () => {
+        if (providerHinted()) {
+          const res = await fetch(`${cfg.auth.service}/oidc/signout`, { method: "POST", credentials: "same-origin" });
+          if (!res.ok) throw new Error(`${res.status} POST ${cfg.auth.service}/oidc/signout`);
+        }
+      },
+      hasKnownPasskeys: (rpId) => knownPasskeys(rpId ?? globalThis.location?.hostname).length > 0,
+      isProviderHinted: providerHinted,
+    });
+    if (guestSession) {
+      guestSession = guestSession.then((s) => {
+        if (session === s) sessionLifecycle.setSession(s);
+        return s;
+      });
+    }
+    const commitGuest = async () => {
+      const s = await sessionLifecycle.commitGuest();
+      if (!s?.user?.guest) return s;
+      session = s;
+      sessionStorage.setItem("pronto-token", JSON.stringify(s));
+      syncAuthDOM(nav, s, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
+      localizeCurrentStrip?.();
+      return s;
+    };
+
     await catalogued;
     const { createStore } = await dataPlane;
     const store = createStore("", {
@@ -1042,6 +1260,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       appBase,
       mintedGuest,
       ensureSession: guestSession ? () => guestSession : null,
+      onRemoteWrite: () => { if (gesture > 0) commitGuest(); },
     });
     const linkPrefetch = startLinkPrefetch({ addresses, appBase, store });
     recovery = JSON.parse(sessionStorage.getItem(recoveryKey) ?? "null");
@@ -1116,6 +1335,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         if (keepOf(previous.route) === 0) discard(previous);
       }
       presented = entry;
+      syncAuthDOM(nav, session, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
       mount.querySelector(":scope > [data-shell-error]")?.remove();
       evict(entry.route);
     };
@@ -1145,24 +1365,35 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       }
     };
 
+    localizeCurrentStrip = () => {
+      if (!nav) return;
+      const locale = current?.locale ?? document.documentElement.lang ?? cfg.i18n?.default;
+      const explicitLocale = Boolean(cfg.i18n && locale === cfg.i18n.default && typeof location !== "undefined" && new URLSearchParams(location.search).has("lang"));
+      localizeStrip(nav, cfg, { locale, here: location.pathname, search: location.search ?? "", messages, explicitLocale });
+    };
+
     // Signing out lands on the door with nothing of the session left standing.
     // The chrome comes down here because the stack appends rather than
     // replaces, so nothing else would take it down; the document is then
     // replaced because the screens' subscriptions and the store's token are
     // the session too, and re-gating in place would keep both.
-    let nav = null;
-    const signOut = async () => {
+    signOut = async () => {
       // The provider's cookie first, or the reload adopts the session again;
       // a sign-out that cannot reach the auth service leaves the reader signed
       // in, and on screen as they were.
-      if (providerHinted()) {
-        const res = await fetch(`${cfg.auth.service}/oidc/signout`, { method: "POST", credentials: "same-origin" });
-        if (!res.ok) throw new Error(`${res.status} POST ${cfg.auth.service}/oidc/signout`);
+      const outcome = await sessionLifecycle.signOut();
+      if (!outcome || outcome.mode === "busy" || outcome.mode === "stopped") return;
+      if (outcome.mode === "in-place") {
+        session = outcome.session;
+        sessionStorage.setItem("pronto-token", JSON.stringify(session));
+        syncAuthDOM(nav, session, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
+        return;
       }
       for (const entry of [...held.values()]) discard(entry);
       current = null;
       nav?.remove();
       mount.replaceChildren();
+      sessionStorage.removeItem(recoveryKey);
       forgetSession();
       location.reload();
     };
@@ -1173,27 +1404,32 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       // the link the reader may be on, and its words and addresses rewritten
       // in place by the first show(). One naming others is another deploy's,
       // and gives way to this one, its words written in the same task.
-      const routesOf = (strip) => [...strip.querySelectorAll(":scope > a[data-route]")].map((a) => a.dataset.route).join(" ");
+      const routesOf = (strip) => [
+        strip.querySelector(":scope > .shell-brand") ? "1" : "0",
+        ...[...strip.querySelectorAll(":scope > a[data-route]")].map(
+          (a) => `${a.dataset.route}:${a.dataset.entry ?? ""}:${a.dataset.icon ?? ""}:${a.dataset.display ?? ""}`,
+        ),
+      ].join(" ");
       const kept = servedStrip !== null && routesOf(servedStrip) === routesOf(nav) ? servedStrip : null;
       if (kept !== null) nav = kept;
       else if (servedStrip) servedStrip.replaceWith(nav);
       else mount.before(nav);
       const servedBox = kept?.querySelector(":scope > .shell-me") ?? null;
       if (session) {
-        const box = renderSession(session, cfg, store, signOut, chrome, servedBox);
+        const box = renderSession(session, cfg, store, signOut, chrome, servedBox, sessionLifecycle);
         if (box !== servedBox) {
           servedBox?.remove();
           nav.append(box);
         }
       } else if (mintedGuest && offersGuest(cfg)) {
-        const box = renderPromote(() => guestSession, cfg, chrome, servedBox);
+        const box = renderPromote(sessionLifecycle, cfg, chrome, servedBox, null, signOut, guestSession ? () => guestSession : null);
         if (box !== servedBox) {
           servedBox?.remove();
           nav.append(box);
         }
       } else if (mintedGuest) {
         guestSession = guestSession.then((s) => {
-          const box = renderSession(s, cfg, store, signOut, chrome, servedBox);
+          const box = renderSession(s, cfg, store, signOut, chrome, servedBox, sessionLifecycle);
           if (box !== servedBox) {
             servedBox?.remove();
             nav.append(box);
@@ -1206,6 +1442,121 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         });
       } else servedBox?.remove();
     } else servedStrip?.remove();
+
+    const runPasskeyAuth = async (button, kind) => {
+      if (sessionLifecycle.busy()) return;
+      const existingFeedback = button?.closest?.("[data-auth-feedback]") ?? null;
+      const container = existingFeedback?.parentElement ?? button?.parentElement ?? null;
+      existingFeedback?.remove();
+      const stripSignIn = nav?.querySelector(":scope > .shell-me .shell-signin") ?? null;
+      const stripCreate = nav?.querySelector(":scope > .shell-me .shell-register") ?? null;
+      const modalControls = container ? [...container.querySelectorAll("button, [data-auth-action], [data-auth-provider]")] : [];
+      if (button) {
+        button.disabled = true;
+        delete button.dataset.authError;
+      }
+      for (const ctrl of modalControls) {
+        ctrl.disabled = true;
+        ctrl.setAttribute("aria-disabled", "true");
+      }
+      if (stripSignIn) stripSignIn.disabled = true;
+      if (stripCreate) stripCreate.disabled = true;
+      container?.querySelectorAll(":scope > [data-auth-feedback]").forEach((el) => el.remove());
+      let outcome;
+      try {
+        outcome = kind === "register"
+          ? await sessionLifecycle.registerPasskey({ origin: "action" })
+          : await sessionLifecycle.signInPasskey({ origin: "action" });
+      } finally {
+        if (button) button.disabled = false;
+        for (const ctrl of modalControls) {
+          ctrl.disabled = false;
+          ctrl.removeAttribute("aria-disabled");
+        }
+        if (stripSignIn) stripSignIn.disabled = false;
+        if (stripCreate) stripCreate.disabled = false;
+      }
+      if (!outcome || outcome.status === "busy" || outcome.status === "stopped") return;
+      if (outcome.status === "failed") {
+        console.error(outcome.error);
+        if (button) button.dataset.authError = "true";
+        const screenEl = button?.closest?.(".shell-screen") ?? container?.closest?.(".shell-screen") ?? null;
+        if (screenEl && (button?.closest?.(".login-modal-backdrop, .login-modal-overlay, .login-modal-card") || container?.closest?.(".login-modal-backdrop, .login-modal-overlay, .login-modal-card")) && !/\blogin\b/.test(screenEl.querySelector(".screen")?.dataset?.state ?? "")) {
+          const toggle = screenEl.querySelector("#login-modal-toggle");
+          if (toggle && "checked" in toggle) {
+            toggle.checked = true;
+          } else {
+            const trigger = screenEl.querySelector("[data-auth-trigger], #btn-top-login");
+            if (typeof trigger?.click === "function") trigger.click();
+            else trigger?.dispatchEvent(new (document.defaultView?.Event ?? Event)("click", { bubbles: true }));
+          }
+        }
+        if (container) {
+          const locale = current?.locale ?? document.documentElement.lang ?? cfg.i18n?.default;
+          const feedback = document.createElement("div");
+          feedback.className = "shell-auth-feedback";
+          feedback.dataset.authFeedback = "";
+          feedback.setAttribute("role", "alert");
+          const msg = document.createElement("p");
+          msg.className = "shell-auth-error";
+          msg.textContent = chrome("chrome_passkey_failed", locale);
+          feedback.append(msg);
+          if (outcome.recoveryOffered && !container.querySelector('[data-auth-action="passkey-register"]')) {
+            const recover = document.createElement("button");
+            recover.type = "button";
+            recover.className = "shell-auth-recover";
+            recover.dataset.authAction = "passkey-register";
+            recover.textContent = chrome("chrome_passkey_create", locale);
+            feedback.append(recover);
+          }
+          container.append(feedback);
+        }
+        return;
+      }
+      const next = outcome.session;
+      if (!outcome.sameOwner) sessionStorage.removeItem(recoveryKey);
+      sessionStorage.setItem("pronto-token", JSON.stringify(next));
+      if (outcome.transitionMode === "in-place") {
+        session = next;
+        if (nav) {
+          const oldBox = nav.querySelector(":scope > .shell-me");
+          const nextBox = renderSession(next, cfg, store, signOut, chrome, null, sessionLifecycle);
+          if (oldBox) oldBox.replaceWith(nextBox);
+          else nav.append(nextBox);
+          localizeCurrentStrip();
+        }
+        syncAuthDOM(nav, next, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
+        return;
+      }
+      location.reload();
+    };
+    document.addEventListener("click", (e) => {
+      const providerEl = e.target?.closest?.("[data-auth-provider]");
+      if (providerEl && cfg.auth?.service) {
+        if (providerEl.localName !== "label") e.preventDefault();
+        if (sessionLifecycle.busy()) return;
+        const provider = providerEl.dataset.authProvider;
+        const here = `${location.pathname ?? "/"}${location.search ?? ""}${location.hash ?? ""}`;
+        location.href = providerHref(cfg.auth.service, provider, here);
+        return;
+      }
+      const actionEl = e.target?.closest?.("[data-auth-action]");
+      if (!actionEl) return;
+      const action = actionEl.dataset.authAction;
+      if (action === "guest") {
+        if (actionEl.localName !== "label") e.preventDefault();
+        commitGuest();
+      } else if (action === "signout") {
+        if (actionEl.localName !== "label") e.preventDefault();
+        signOut();
+      } else if ((action === "passkey-signin" || action === "passkey") && cfg.auth?.service) {
+        if (actionEl.localName !== "label") e.preventDefault();
+        runPasskeyAuth(actionEl, "signin");
+      } else if (action === "passkey-register" && cfg.auth?.service) {
+        if (actionEl.localName !== "label") e.preventDefault();
+        runPasskeyAuth(actionEl, "register");
+      }
+    });
 
     // The address this mount is already rendering, spelled as it should be.
     // The Navigation API reports a replaceState as a navigation, and taking
@@ -1635,6 +1986,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       if (entry.handle === undefined || entry.words === words.taken()) return;
       entry.words = words.taken();
       entry.handle.localize();
+      syncAuthDOM(nav, session, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
       localizeStrip(nav, cfg, { locale: entry.locale, here: location.pathname, search: location.search ?? "", messages });
     };
     // A deployment the page could not take. One the network failed to answer
@@ -1879,7 +2231,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) heed();
     });
-    return { store, navigate, cortex };
+    return { store, navigate, cortex, sessionLifecycle };
   } catch (err) {
     if (heal !== null && (isMissing(err) || document.querySelector('meta[name="pronto-kept"]')) && await heal()) return;
     banner(err);

@@ -41,7 +41,7 @@ export interface Release {
   screens: Record<string, string[]>
   entries: string[]
   scripts: string[]
-  cfg: { routes: { path: string; screen?: string; paths?: Record<string, string>; access?: 'public' | 'private'; ssr?: 'spa' | 'ssg' | 'ssr'; files: Record<string, string | string[]>; nav: { label: string; strip?: boolean } }[]; auth?: { required?: boolean }; tables?: unknown[]; i18n?: { locales?: Record<string, unknown> }; prefix?: string }
+  cfg: { brand?: { label: string; key?: string }; routes: { path: string; screen?: string; paths?: Record<string, string>; access?: 'public' | 'private'; ssr?: 'spa' | 'ssg' | 'ssr'; files: Record<string, string | string[]>; nav: { label: string; icon?: string; display?: 'icon-only'; strip?: boolean } }[]; auth?: { required?: boolean }; tables?: unknown[]; i18n?: { locales?: Record<string, unknown> }; prefix?: string }
 }
 
 /** An RTCIceServer: a STUN server's `urls`, and a TURN relay's credentials. */
@@ -59,6 +59,18 @@ export interface AddressOptions {
    * RTCPeerConnection, written into the terminal config before it is
    * addressed; without them the tree keeps the config's own. */
   iceServers?: IceServer[]
+  /** The sources a door adds to every entry's frame-src: a realm subdomain's
+   * label under each of the door's own hosts, which no tree names. */
+  frames?: string[]
+}
+
+/** `policy` with `frames` added to its frame-src, which it must have. */
+export function admitFrames(policy: string, frames: string[], name: string): string {
+  const directives = policy.split(';').map(d => d.trim()).filter(Boolean)
+  const at = directives.findIndex(d => d.split(/\s/)[0] === 'frame-src')
+  if (at < 0) throw new Error(`${name}: its Content-Security-Policy has no frame-src to admit ${frames.join(' ')}`)
+  directives[at] = [directives[at], ...frames].join(' ')
+  return directives.join('; ')
 }
 
 /** The ICE servers a release names, refused unless each is an RTCIceServer. */
@@ -88,7 +100,7 @@ export async function addressRelease(out: string, options: AddressOptions = {}):
       else if (!entry.isFile || name === 'offline-first-sw.js') continue
       else {
         const bytes = await Deno.readFile(path.join(out, name))
-        if (name.endsWith('.html') && ENTRY.test(decoder.decode(bytes))) entries.push(name)
+        if (name.endsWith('.html') && !name.startsWith('shell/units/') && ENTRY.test(decoder.decode(bytes))) entries.push(name)
         else files.set('/' + name.split('/').map(encodeURIComponent).join('/'), bytes)
       }
     }
@@ -261,7 +273,8 @@ export async function addressRelease(out: string, options: AddressOptions = {}):
     for (const hash of hashes) scripts.add(hash)
     const csp = document.querySelector('meta[http-equiv="Content-Security-Policy"]')
     if (csp) {
-      const policy = csp.getAttribute('content')!
+      const written = csp.getAttribute('content')!
+      const policy = options.frames?.length ? admitFrames(written, options.frames, name) : written
       if (!/(?:^|;)\s*script-src\s/.test(policy)) throw new Error(`${name}: its CSP has no script-src`)
       csp.setAttribute('content', policy.replace(/((?:^|;)\s*script-src(?:-elem)?)\s/g, `$1 ${hashes.join(' ')} `))
       // The policy must be active before the import map is parsed.
