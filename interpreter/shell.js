@@ -36,7 +36,7 @@ const authPosture = (session, promote = false) => {
 // and busy() over that, and starts nothing. An app with an auth service passes `load`: the first ceremony call (sign-in,
 // register, sign-out, commit) builds the real lifecycle from the held session, and it and every later call go to it.
 // An app with no auth at all passes none and stays inert.
-const stoodInSessionLifecycle = (initial, promote, load = null) => {
+export const stoodInSessionLifecycle = (initial, promote, load = null) => {
   let held = initial;
   let real = null;
   let loading = null;
@@ -46,13 +46,13 @@ const stoodInSessionLifecycle = (initial, promote, load = null) => {
     return real[name](...args);
   };
   return {
-    session: () => real?.session() ?? held,
+    session: () => (real ? real.session() : held),
     setSession: (s) => {
       held = s;
       real?.setSession(s);
     },
-    posture: () => real?.posture() ?? authPosture(held, promote),
-    busy: () => real?.busy() ?? false,
+    posture: () => (real ? real.posture() : authPosture(held, promote)),
+    busy: () => (real ? real.busy() : false),
     commitGuest: delegate("commitGuest", async () => held),
     signOut: delegate("signOut", async () => ({ mode: "reload" })),
     signInPasskey: delegate("signInPasskey", async () => ({ status: "stopped" })),
