@@ -12,15 +12,18 @@ export function staticSpecs(src: string): string[] {
 
 export async function staticClosure(entry: string, root: URL = interpreterRoot): Promise<Set<string>> {
   const seen = new Set<string>()
-  const queue = [entry]
+  const visited = new Set<string>()
+  const queue = [new URL(entry, root).href]
   while (queue.length > 0) {
-    const name = queue.shift()!
-    if (seen.has(name)) continue
-    seen.add(name)
-    const src = await Deno.readTextFile(new URL(name, root))
+    const href = queue.shift()!
+    if (visited.has(href)) continue
+    visited.add(href)
+    // Names are interpreter-relative; a module outside the root is walked but not named.
+    if (href.startsWith(root.href)) seen.add(href.slice(root.href.length))
+    const src = await Deno.readTextFile(new URL(href))
     for (const spec of staticSpecs(src)) {
       if (!spec.startsWith("./") && !spec.startsWith("../")) continue
-      queue.push(new URL(spec, new URL(name, root)).href.slice(root.href.length))
+      queue.push(new URL(spec, href).href)
     }
   }
   return seen

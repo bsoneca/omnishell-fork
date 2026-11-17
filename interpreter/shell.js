@@ -1107,7 +1107,10 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       ? JSON.parse(text)
       : (await import("./vendor/js-yaml.js")).load(text);
     // Start the fetch at once when the app needs it; the await comes where the module is used.
-    const lifecycleImport = cfg.cortex !== undefined || cfg.auth !== undefined ? import("./cortex-navigation.js") : null;
+    // The storybook path returns before it is consumed, so it never starts it. The no-op catch keeps an early
+    // rejection from going unhandled; the later await still throws.
+    const lifecycleImport = (cfg.cortex !== undefined || cfg.auth !== undefined) && !new URLSearchParams(location.search).has("storybook") ? import("./cortex-navigation.js") : null;
+    lifecycleImport?.catch(() => {});
     // Row attachments are paid for by an app that declares a cortex, and by no
     // other. (cortex-navigation loads only for a cortex or an auth: see needsLifecycle.)
     const rowAttachments = cfg.cortex === undefined ? undefined : (await import("./row-attachments.js")).createRowAttachments(Object.fromEntries(Object.entries(cfg.cortex.actors ?? {}).filter(([, binding]) => binding.via === "rows")));
@@ -1268,8 +1271,8 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     let nav = null;
     let signOut = null;
     let localizeCurrentStrip = null;
-    // cortex-navigation.js (xstate) is loaded lazily: only when the app declares a cortex or
-    // auth. A plain app with neither skips the ~85 kB vendor/xstate.js payload entirely.
+    // cortex-navigation.js (xstate) is imported only when the app declares a cortex or auth. The preload list
+    // still fetches xstate's bytes for a plain app; only its evaluation is lazy there.
     // Screen machines load xstate through machine-engine.js and never pass through
     // cortex-navigation.js. A tables-only app does mint a guest with neither set; that session
     // has no lifecycle, which is why every use of it below is guarded.

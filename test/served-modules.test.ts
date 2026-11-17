@@ -69,5 +69,9 @@ describe("the interpreter's served modules", () => {
     // The entry's own closure is never skipped but for what a first paint does not need; session-posture is served, not skipped.
     expect(list.has("session-posture.js")).toBe(true)
     expect(skip.has("session-posture.js")).toBe(false)
+    for (const m of ["cortex-navigation.js", "vendor/xstate.js", "row-attachments.js", "machine-engine.js", "statechart.js"]) {
+      expect(list.has(m)).toBe(true)
+      expect(skip.has(m)).toBe(false)
+    }
   })
 })
