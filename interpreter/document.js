@@ -83,6 +83,7 @@ export async function renderDocument({
   here,
   onHead,
   onChunk,
+  preloadPrefix = "",
 }) {
   if (typeof origin !== "string") throw new Error("a document's links are absolute, and no origin was given to spell them against");
   const doc = parse(await withoutFirstPaint(entry));
@@ -101,7 +102,7 @@ export async function renderDocument({
     witness.setAttribute("name", "pronto-cas");
     witness.setAttribute("content", cas);
     doc.head.append(witness);
-    preloadScreen(doc, appBase, route);
+    preloadScreen(doc, appBase, route, { prefix: preloadPrefix });
     deferBoot(doc);
   };
   const uncomment = (node) => {
