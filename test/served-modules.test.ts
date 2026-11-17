@@ -57,4 +57,34 @@ describe("the interpreter's served modules", () => {
     }
     expect(missing).toEqual([])
   })
+
+  it("leave out of the entry's preloads every module only a dynamic import reaches that binds xstate", async () => {
+    const cue = await Deno.readTextFile(new URL("../terminal.cue", import.meta.url))
+    const skip = new Set([...cue.match(/_preloadSkip:\s*\{([^}]*)\}/)![1].matchAll(/"([^"]+)":\s*true/g)].map((m) => m[1]))
+    const staticClosure = async (entry: string) => {
+      const seen = new Set<string>()
+      const queue = [entry]
+      while (queue.length > 0) {
+        const name = queue.shift()!
+        if (seen.has(name)) continue
+        seen.add(name)
+        const src = await Deno.readTextFile(new URL(name, interpreter))
+        for (const m of src.matchAll(/(?:^|[\n;])\s*(?:import|export)\b[^;"']*?\bfrom\s*["'](\.\/[^"']+)["']/g)) queue.push(new URL(m[1], new URL(name, interpreter)).href.slice(interpreter.href.length))
+      }
+      return seen
+    }
+    const entry = await staticClosure("shell.js")
+    expect(entry.has("vendor/xstate.js")).toBe(false)
+    const list = await declared()
+    const offenders: string[] = []
+    for (const m of list) {
+      if (!m.endsWith(".js") || entry.has(m) || skip.has(m)) continue
+      if ((await staticClosure(m)).has("vendor/xstate.js")) offenders.push(m)
+    }
+    expect(offenders).toEqual([])
+    // The entry's own closure is never skipped but for what a first paint does not need; session-posture is served, not skipped.
+    expect(list.has("session-posture.js")).toBe(true)
+    expect(skip.has("session-posture.js")).toBe(false)
+    for (const m of ["cortex-navigation.js", "vendor/xstate.js", "row-attachments.js"]) expect(skip.has(m)).toBe(true)
+  })
 })

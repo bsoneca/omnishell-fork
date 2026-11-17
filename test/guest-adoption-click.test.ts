@@ -147,3 +147,23 @@ Deno.test({
     expect(sessionStorage.getItem("pronto-token")).toBe(null)
   },
 })
+
+Deno.test({
+  name: "a second click while the adoption is under way is not a second handoff",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const app = await boot(null)
+    await app.booting
+    await settle()
+    const link = app.document.querySelector(".shell-provider")
+    click(app, link)
+    click(app, link)
+    click(app, app.document.getElementById("provider"))
+    click(app, app.document.getElementById("provider"))
+    await settle(250)
+    expect(app.adopted.length).toBe(2)
+    expect(app.events.filter((e) => e === `assign ${link.href}`).length).toBe(1)
+    expect(app.events.filter((e) => e.startsWith("href ")).length).toBe(1)
+  },
+})

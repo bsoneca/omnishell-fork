@@ -473,7 +473,9 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// under a mounted screen, kinetic, prng and game-inputs for a kinetic
 		// child and its mount, its sound seat, the rollback session, its channel and GGRS for
 		// a duel, and the
-		// presenter's worker script, which no page runs.
+		// presenter's worker script, which no page runs. xstate and every module that
+		// binds it statically (cortex navigation, row attachments, the machine engine,
+		// the statechart) load on a dynamic import, so a plain app never fetches them.
 		_preloadSkip: {
 			"presenter.js":                  true
 			"deferred-boot.js":              true
@@ -491,6 +493,11 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 			"vendor/ggrs/ggrs_wasm_bg.wasm": true
 			"prng.js":                       true
 			"vendor/game-inputs.js":         true
+			"cortex-navigation.js":          true
+			"row-attachments.js":            true
+			"machine-engine.js":             true
+			"statechart.js":                 true
+			"vendor/xstate.js":              true
 		}
 		_preloadHtml: strings.Join([for m in modules if _preloadSkip[m] == _|_ {
 			"<link rel=\"modulepreload\" href=\"/omnishell/interpreter/\(m)\">"
@@ -498,7 +505,7 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 
 		modules: [...#Path]
 		modules: [
-			"shell.js", "cortex-navigation.js", "row-attachments.js", "machine-references.js", "machine-shape.js", "machine-engine.js", "observe-actor.js", "invoked-actors.js", "chrome.js", "screen.js", "fragment.js", "data-sync.js", "validate.js", "render.js",
+			"shell.js", "session-posture.js", "cortex-navigation.js", "row-attachments.js", "machine-references.js", "machine-shape.js", "machine-engine.js", "observe-actor.js", "invoked-actors.js", "chrome.js", "screen.js", "fragment.js", "data-sync.js", "validate.js", "render.js",
 			"release-plan.js", "early-gestures.js", "early-replay.js", "nav-feedback.js", "preloads.js", "link-prefetch.js", "markup.js", "script-url.js", "deferred-boot.js",
 			"host-dom.js", "hatch.js", "hatch-worker.js", "hatch-presenter.js", "presenter-realm.js", "presenter.js",
 			"storybook.js", "jessie.js", "statechart.js", "kinetic.js", "kinetic-milestones.js", "kinetic-session.js", "kinetic-sound.js", "kinetic-mount.js", "rtc-channel.js", "prng.js",

@@ -24,10 +24,9 @@ import { compileCatalog } from "./vendor/messages.js";
 import { filesMoved, planRelease } from "./release-plan.js";
 import { replayEarlyGestures, takeEarlyGestures } from "./early-replay.js";
 import { navFeedback } from "./nav-feedback.js";
-import { authPosture, SESSION_LIFECYCLE_CHART } from "./session-posture.js";
+import { authPosture } from "./session-posture.js";
 export { authPosture, SESSION_LIFECYCLE_CHART } from "./session-posture.js";
-// createSessionLifecycle is re-exported via an async wrapper (see bottom of file).
-// cortex-navigation.js (xstate) is loaded lazily when the app's config requires it.
+// cortex-navigation.js (xstate) is loaded lazily when the app's config requires it (see loadSessionLifecycle).
 export { routeAt } from "./fragment.js";
 import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
 import { startLinkPrefetch } from "./link-prefetch.js";
@@ -70,7 +69,7 @@ const dropKeptGuest = (storage = browserStorage()) => {
 /** Rewrites a kept-guest record in localStorage when one exists, preserving
  *  its `keptAt` and updating the rest of the session fields. A guest's
  *  `committed` flag is set after keepGuest stores it, so this keeps the
- *  two copies in sync. */
+ *  two copies in sync. A record of a different user id is left alone. */
 export function rewriteKeptGuest(session, storage = browserStorage()) {
   if (!session?.user?.guest) return;
   try {
@@ -80,6 +79,8 @@ export function rewriteKeptGuest(session, storage = browserStorage()) {
     if (kept?.user?.guest !== true) return;
     const { keptAt } = kept;
     if (typeof keptAt !== "number") return;
+    // A record of another guest (another tab's) is not this session's to rewrite.
+    if (kept.user.id !== session.user.id) return;
     storage?.setItem(KEPT_GUEST, JSON.stringify({ ...session, keptAt }));
   } catch { /* storage refused: nothing rewritten */ }
 }
@@ -161,7 +162,9 @@ async function refreshGuest(cfg, kept, fetchFn) {
     if ([401, 404, 409].includes(res.status)) return null;
     if (!res.ok) return kept;
     const fresh = await res.json();
-    return typeof fresh?.token === "string" && fresh.user?.guest === true ? fresh : kept;
+    if (typeof fresh?.token !== "string" || fresh.user?.guest !== true) return kept;
+    // A refresh drops what the service does not know: a committed guest stays committed.
+    return kept.committed && kept.user?.id === fresh.user.id ? { ...fresh, committed: true } : fresh;
   } catch {
     return kept;
   }
@@ -652,11 +655,19 @@ function syncAuthDOM(nav, session, opts = {}) {
 
 /** Hands the guest to the auth service before a provider's link is followed, catching failures so the sign-in
  *  proceeds even when the adoption POST fails. Shared by strip and document-level provider handlers. */
-export async function adoptGuestSafe(cfg, session, fetchFn = globalThis.fetch) {
+export const ADOPT_TIMEOUT_MS = 5000;
+export async function adoptGuestSafe(cfg, session, fetchFn = globalThis.fetch, timeoutMs = ADOPT_TIMEOUT_MS) {
+  // The wait for the session and for the POST is bounded: past it the sign-in proceeds without the handoff.
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const timedOut = new Promise((resolve) => ctl.signal.addEventListener("abort", resolve));
+  const bounded = (url, init = {}) => fetchFn(url, { ...init, signal: ctl.signal });
   try {
-    await adoptGuest(cfg, await session(), fetchFn);
+    await Promise.race([(async () => adoptGuest(cfg, await session(), bounded))(), timedOut]);
   } catch (err) {
     console.error(err);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -681,11 +692,18 @@ function renderPromote(lifecycle, cfg, chrome, served = null, getSession = null,
   // A provider's way in is a link that leaves the page: where the app asks it (auth.adoptGuest), the guest is handed to
   // the auth service first, then the link is followed. A modified click (a new tab) is the browser's own.
   if (cfg.auth?.adoptGuest) {
+    let adopting = false;
     for (const link of box.querySelectorAll(".shell-provider")) {
       link.addEventListener("click", async (event) => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
-        await adoptGuestSafe(cfg, getSession, globalThis.fetch);
+        if (adopting) return;
+        adopting = true;
+        try {
+          await adoptGuestSafe(cfg, getSession, globalThis.fetch);
+        } finally {
+          adopting = false;
+        }
         location.assign(link.href);
       });
     }
@@ -1570,13 +1588,20 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       }
       location.reload();
     };
+    let adopting = false;
     document.addEventListener("click", async (e) => {
       const providerEl = e.target?.closest?.("[data-auth-provider]");
       if (providerEl && cfg.auth?.service) {
         if (providerEl.localName !== "label") e.preventDefault();
         if (sessionLifecycle?.busy()) return;
+        if (adopting) return;
         if (cfg.auth?.adoptGuest) {
-          await adoptGuestSafe(cfg, currentSession, globalThis.fetch);
+          adopting = true;
+          try {
+            await adoptGuestSafe(cfg, currentSession, globalThis.fetch);
+          } finally {
+            adopting = false;
+          }
         }
         const provider = providerEl.dataset.authProvider;
         const here = `${location.pathname ?? "/"}${location.search ?? ""}${location.hash ?? ""}`;
@@ -2284,10 +2309,9 @@ export async function createShell({ config, mount, preload = true, hostDomModule
   }
 }
 
-// createSessionLifecycle is lazily loaded from cortex-navigation.js; export an
-// async wrapper so public imports (tests) still get it without a static xstate
-// dependency.
-export async function createSessionLifecycle(...args) {
+/** The session lifecycle machine, loaded on demand: cortex-navigation.js carries xstate, which shell.js does not
+ *  import statically. Async, unlike cortex-navigation.js's own sync `createSessionLifecycle`. */
+export async function loadSessionLifecycle(...args) {
   const mod = await import("./cortex-navigation.js");
   return mod.createSessionLifecycle(...args);
 }

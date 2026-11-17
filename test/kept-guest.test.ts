@@ -180,3 +180,20 @@ Deno.test("rewriteKeptGuest is a no-op for a non-guest session", () => {
   rewriteKeptGuest({ token: "a.t.s", user: { id: "a1", guest: false } }, store)
   expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual({ ...guest, keptAt: 1000 })
 })
+
+Deno.test("a refresh keeps a committed guest committed when the user id matches", async () => {
+  const kept = { ...keptAt(T0, T0 + 7 * DAY), committed: true }
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(kept) })
+  const f = service(200, true)
+  const got = await keptGuest(cfg, store, f, lives(true), () => T0 + 6 * DAY)
+  expect(f.refreshes().length).toBe(1)
+  expect(got).toEqual({ ...fresh, committed: true })
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!).committed).toBe(true)
+})
+
+Deno.test("rewriteKeptGuest leaves another tab's guest record alone", () => {
+  const other = { token: "o.t.s", user: { id: "g2", handle: "o", guest: true }, keptAt: 1000 }
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(other) })
+  rewriteKeptGuest({ ...guest, committed: true }, store)
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual(other)
+})

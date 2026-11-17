@@ -401,17 +401,29 @@ Deno.test("session lifecycle: passkey refusal, recovery offer, explicit registra
 });
 
 Deno.test("shell.js has no static dependency on vendor/xstate.js", async () => {
-  const src = await Deno.readTextFile(new URL("../interpreter/shell.js", import.meta.url));
-  // shell.js must not statically import cortex-navigation.js or vendor/xstate.js.
-  if (/^import\s.*from\s+["']\.\/cortex-navigation\.js["']/m.test(src)) {
-    throw new Error("shell.js statically imports cortex-navigation.js; xstate is no longer lazy");
+  // Walk the static import closure from shell.js: `import ... from`, `export ... from` and bare `import "x"`,
+  // multi-line included. Dynamic import() calls are not followed; they are how xstate stays lazy.
+  const staticSpecs = (src: string) => [
+    ...src.matchAll(/(?:^|[\n;])\s*(?:import|export)\b[^;"']*?\bfrom\s*["']([^"']+)["']/g),
+    ...src.matchAll(/(?:^|[\n;])\s*import\s*["']([^"']+)["']/g),
+  ].map((m) => m[1]);
+  const root = new URL("../interpreter/", import.meta.url);
+  const seen = new Set<string>();
+  const queue = ["shell.js"];
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const src = await Deno.readTextFile(new URL(name, root));
+    for (const spec of staticSpecs(src)) {
+      if (!spec.startsWith("./")) continue;
+      queue.push(new URL(spec, new URL(name, root)).href.slice(root.href.length));
+    }
   }
-  if (/^import\s.*from\s+["']\.\/vendor\/xstate\.js["']/m.test(src)) {
-    throw new Error("shell.js statically imports vendor/xstate.js; xstate is no longer lazy");
-  }
-  // Both must only appear as dynamic imports.
-  const dynamicCortex = src.match(/import\(["']\.\/cortex-navigation\.js["']\)/g);
-  if (!dynamicCortex || dynamicCortex.length === 0) {
+  assertEquals(seen.has("vendor/xstate.js"), false, `shell.js statically reaches vendor/xstate.js: ${[...seen].join(", ")}`);
+  assertEquals(seen.has("cortex-navigation.js"), false, `shell.js statically reaches cortex-navigation.js: ${[...seen].join(", ")}`);
+  const src = await Deno.readTextFile(new URL("shell.js", root));
+  if (!/import\(["']\.\/cortex-navigation\.js["']\)/.test(src)) {
     throw new Error("shell.js does not dynamically import cortex-navigation.js");
   }
 });

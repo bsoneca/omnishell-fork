@@ -73,3 +73,21 @@ Deno.test("adoptGuestSafe hands the guest over with its bearer when the flag is 
   expect(init.credentials).toBe("same-origin")
   expect((init.headers as Record<string, string>).authorization).toBe("Bearer g.t.s")
 })
+
+Deno.test("adoptGuestSafe stops waiting for a session that never resolves, so the sign-in proceeds", async () => {
+  const f = (() => Promise.reject(new Error("must not be asked"))) as typeof fetch
+  const started = Date.now()
+  await adoptGuestSafe({ auth: { service: "/auth", adoptGuest: "adopt_flag" } }, () => new Promise(() => {}), f, 30)
+  expect(Date.now() - started).toBeLessThan(1000)
+})
+
+Deno.test("adoptGuestSafe aborts an adoption POST that never answers, so the sign-in proceeds", async () => {
+  let aborted = false
+  const hang = ((url: RequestInfo | URL, init?: RequestInit) => {
+    if (String(url).startsWith("/ofrep/")) return Promise.resolve(new Response(JSON.stringify({ value: true })))
+    return new Promise((_, reject) => init?.signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("aborted", "AbortError")) }))
+  }) as typeof fetch
+  const guest = { token: "g.t.s", user: { id: "g1", guest: true } }
+  await adoptGuestSafe({ auth: { service: "/auth", adoptGuest: "adopt_flag" } }, () => Promise.resolve(guest), hang, 30)
+  expect(aborted).toBe(true)
+})
