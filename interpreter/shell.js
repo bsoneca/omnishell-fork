@@ -24,10 +24,28 @@ import { compileCatalog } from "./vendor/messages.js";
 import { filesMoved, planRelease } from "./release-plan.js";
 import { replayEarlyGestures, takeEarlyGestures } from "./early-replay.js";
 import { navFeedback } from "./nav-feedback.js";
-// The session lifecycle runs in every app (guest, sign-in, sign-out), so cortex-navigation.js loads statically;
-// row-attachments.js still loads only for an app that declares a cortex (PRONTO-134).
-import { authPosture, createSessionLifecycle } from "./cortex-navigation.js";
-export { authPosture, createSessionLifecycle, SESSION_LIFECYCLE_CHART } from "./cortex-navigation.js";
+// cortex-navigation.js (and the statechart library under it) loads by import() only where a session can exist or
+// a cortex is declared, never in the first load of an app that has neither (PRONTO-134).
+// What a session reads as; the same rule as cortex-navigation.js's authPosture.
+const authPosture = (session, promote = false) => {
+  if (!session) return "anonymous";
+  if (session.user?.guest) return promote && !session.committed ? "anonymous" : "guest";
+  return "user";
+};
+// The lifecycle of an app where no session can exist: it holds what it is given and starts no ceremony.
+const inertSessionLifecycle = (initial, promote) => {
+  let held = initial;
+  return {
+    session: () => held,
+    setSession: (s) => { held = s; },
+    posture: () => authPosture(held, promote),
+    busy: () => false,
+    commitGuest: async () => held,
+    signOut: async () => ({ mode: "reload" }),
+    signInPasskey: async () => ({ status: "stopped" }),
+    registerPasskey: async () => ({ status: "stopped" }),
+  };
+};
 export { routeAt } from "./fragment.js";
 import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
 import { startLinkPrefetch } from "./link-prefetch.js";
@@ -65,6 +83,16 @@ const dropKeptGuest = (storage = browserStorage()) => {
   try {
     storage?.removeItem(KEPT_GUEST);
   } catch { /* storage refused: nothing kept */ }
+};
+
+// A guest that committed (took the strip's gesture) is rewritten into its kept copy, where one exists, so the next
+// visit returns to it as committed; a copy is never made here, only keepGuest's flag makes one. Its keptAt stays.
+const keepCommittedGuest = (session, storage = browserStorage()) => {
+  try {
+    const held = storage?.getItem(KEPT_GUEST);
+    if (held === null || held === undefined) return;
+    storage.setItem(KEPT_GUEST, JSON.stringify({ ...session, committed: true, keptAt: JSON.parse(held).keptAt }));
+  } catch { /* storage refused, or a copy no longer readable: nothing kept */ }
 };
 
 /** Whether a boolean flag is on, asked over OpenFeature's remote evaluation
@@ -1221,7 +1249,9 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     let nav = null;
     let signOut = null;
     let localizeCurrentStrip = null;
-    const sessionLifecycle = createSessionLifecycle({
+    const sessionCanExist = Boolean(cfg.auth?.required) || (cfg.tables?.length ?? 0) > 0;
+    const createSessionLifecycle = sessionCanExist ? (await import("./cortex-navigation.js")).createSessionLifecycle : null;
+    const sessionLifecycle = createSessionLifecycle === null ? inertSessionLifecycle(session, offersGuest(cfg)) : createSessionLifecycle({
       session,
       promote: offersGuest(cfg),
       required: Boolean(cfg.auth?.required),
@@ -1247,6 +1277,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       const s = await sessionLifecycle.commitGuest();
       if (!s?.user?.guest) return s;
       session = s;
+      keepCommittedGuest(s);
       sessionStorage.setItem("pronto-token", JSON.stringify(s));
       syncAuthDOM(nav, s, { signOut, chrome, cfg, lifecycle: sessionLifecycle });
       localizeCurrentStrip?.();
@@ -1516,6 +1547,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       const next = outcome.session;
       if (!outcome.sameOwner) sessionStorage.removeItem(recoveryKey);
       sessionStorage.setItem("pronto-token", JSON.stringify(next));
+      if (next?.user?.guest !== true) dropKeptGuest();
       if (outcome.transitionMode === "in-place") {
         session = next;
         if (nav) {
@@ -1537,7 +1569,15 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         if (sessionLifecycle.busy()) return;
         const provider = providerEl.dataset.authProvider;
         const here = `${location.pathname ?? "/"}${location.search ?? ""}${location.hash ?? ""}`;
-        location.href = providerHref(cfg.auth.service, provider, here);
+        (async () => {
+          // The same hand-over as the strip's provider link: the guest goes to the auth service first, where the app asks it.
+          try {
+            await adoptGuest(cfg, sessionLifecycle.session() ?? session ?? await guestSession);
+          } catch (err) {
+            console.error(err);
+          }
+          location.href = providerHref(cfg.auth.service, provider, here);
+        })();
         return;
       }
       const actionEl = e.target?.closest?.("[data-auth-action]");
