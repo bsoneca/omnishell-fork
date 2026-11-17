@@ -41,7 +41,7 @@ const SCREEN_HTML = `<section class="screen" data-screen="table">
 </section>`
 
 // A press holds the card it lands on.
-const PRESS = `(state, event) => {
+const PRESS = `({ context: state, event }) => {
   if (event.type !== "pointerdown") return { updates: [] };
   return { updates: [{ op: "patch", entity: "card", id: event.id, row: { held: "yes" } }] };
 }`
@@ -49,14 +49,14 @@ const PRESS = `(state, event) => {
 // The table's reduce, woken by every write to what it reads. At rest nothing
 // stays held — which is right, and is what a wake between the card's write and
 // the machine's mistakes the middle of a press for.
-const GUARD = `(state, event) => {
+const GUARD = `({ context: state, event }) => {
   if (event.type !== "mutation") return { updates: [] };
   const game = state.items?.[0];
   if (game?.drag !== "idle") return { updates: [] };
   return { updates: state.rows.card.filter((c) => c.held === "yes").map((c) => ({ op: "patch", entity: "card", id: c.id, row: { held: "no" } })) };
 }`
 
-const TAP = `(state, event) => {
+const TAP = `({ context: state, event }) => {
   if (event.type !== "click") return { updates: [] };
   return { updates: [{ op: "patch", entity: "card", id: event.id, row: { taps: 1 } }] };
 }`
