@@ -131,7 +131,11 @@ export type Cluster = {
    * reader: with nobody reading there is no visibility question to settle. */
   access?: Record<
     string,
-    { scope: string; owner?: string; parent?: string; on?: string; shared?: { via: string; on: string; user: string } }
+    {
+      scope: string; owner?: string; parent?: string; on?: string; user?: string;
+      shared?: { via: string; on: string; user: string; group?: string; role?: string; writersCanShare?: boolean; members?: { table: string; group: string; user: string } };
+      groups?: { group: string; of: string; role?: string; column?: string; key?: string; members: { table: string; group: string; user: string } }[];
+    }
   >;
   me?: string;
   /** The carrier table the shell is served with (shell.yaml `carriers`):

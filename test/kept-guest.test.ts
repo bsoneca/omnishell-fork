@@ -1,5 +1,5 @@
 import { expect } from "@test/harness"
-import { flagOn, keepGuest, keptGuest, KEPT_GUEST } from "../interpreter/shell.js"
+import { flagOn, keepGuest, keptGuest, KEPT_GUEST, rewriteKeptGuest } from "../interpreter/shell.js"
 
 // A guest's session lives in the tab, so every visit minted a new, empty
 // guest. Where the app's auth names a flag in keepGuest and it is on, the
@@ -160,4 +160,40 @@ Deno.test("with the flag off no refresh is asked for", async () => {
   const f = service(200, false)
   expect(await keptGuest(cfg, store, f, lives(true), () => T0 + 5 * DAY)).toBe(null)
   expect(f.refreshes().length).toBe(0)
+})
+
+Deno.test("rewriteKeptGuest preserves keptAt and updates the session when a kept record exists", () => {
+  const store = memory({ [KEPT_GUEST]: JSON.stringify({ ...guest, keptAt: 1000 }) })
+  const committed = { ...guest, committed: true, token: "g.t.s.committed" }
+  rewriteKeptGuest(committed, store)
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual({ ...committed, keptAt: 1000 })
+})
+
+Deno.test("rewriteKeptGuest is a no-op when no kept record exists", () => {
+  const store = memory()
+  rewriteKeptGuest({ ...guest, committed: true }, store)
+  expect(store.map.size).toBe(0)
+})
+
+Deno.test("rewriteKeptGuest is a no-op for a non-guest session", () => {
+  const store = memory({ [KEPT_GUEST]: JSON.stringify({ ...guest, keptAt: 1000 }) })
+  rewriteKeptGuest({ token: "a.t.s", user: { id: "a1", guest: false } }, store)
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual({ ...guest, keptAt: 1000 })
+})
+
+Deno.test("a refresh keeps a committed guest committed when the user id matches", async () => {
+  const kept = { ...keptAt(T0, T0 + 7 * DAY), committed: true }
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(kept) })
+  const f = service(200, true)
+  const got = await keptGuest(cfg, store, f, lives(true), () => T0 + 6 * DAY)
+  expect(f.refreshes().length).toBe(1)
+  expect(got).toEqual({ ...fresh, committed: true })
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!).committed).toBe(true)
+})
+
+Deno.test("rewriteKeptGuest leaves another tab's guest record alone", () => {
+  const other = { token: "o.t.s", user: { id: "g2", handle: "o", guest: true }, keptAt: 1000 }
+  const store = memory({ [KEPT_GUEST]: JSON.stringify(other) })
+  rewriteKeptGuest({ ...guest, committed: true }, store)
+  expect(JSON.parse(store.map.get(KEPT_GUEST)!)).toEqual(other)
 })

@@ -43,11 +43,11 @@ import (
 // on #Terminal.surface.assets; emit.cue reads them as plain CUE values
 // (text:), never a src: path — write.ts refuses any src leaving the app's
 // own directory (checked directly).
-_shellHtmlAsset: _ @embed(file="shell.html", type=text)
-_shellCssAsset:  _ @embed(file="shell.css", type=text)
-_bootJsAsset:    _ @embed(file="boot.js", type=text)
-_swJsAsset:      _ @embed(file="offline-first-sw.js", type=text)
-_cspAsset:       _ @embed(file="content-security-policy.txt", type=text)
+_shellHtmlAsset:  _ @embed(file="shell.html", type=text)
+_shellCssAsset:   _ @embed(file="shell.css", type=text)
+_bootJsAsset:     _ @embed(file="boot.js", type=text)
+_swJsAsset:       _ @embed(file="offline-first-sw.js", type=text)
+_cspAsset:        _ @embed(file="content-security-policy.txt", type=text)
 _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 
 // The server terminal (server/render.ts): a route's document rendered on
@@ -64,16 +64,16 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 	home: "plugins/omnishell"
 	// Directories of this plugin, relative to the runtime that holds it, each
 	// copied whole to the same name under `workdir`.
-	dirs: ["\(home)/interpreter", "\(home)/server"]
+	dirs:    ["\(home)/interpreter", "\(home)/server"]
 	workdir: "/render"
 	// The app's entry page, where the app keeps it and where the image places
 	// it: the door answers the entry's own address with a redirect, so it is
 	// the one file not read through it.
-	entry: {source: "shell/index.html", target: "/render/entry.html"}
-	port:  8090
-	cache: "deno cache --frozen --config plugins/omnishell/server/deno.json plugins/omnishell/server/render.ts"
+	entry:   {source: "shell/index.html", target: "/render/entry.html"}
+	port:    8090
+	cache:   "deno cache --frozen --config plugins/omnishell/server/deno.json plugins/omnishell/server/render.ts"
 	command: ["deno", "run", "--frozen", "--cached-only", "--config", "plugins/omnishell/server/deno.json", "--allow-net", "--allow-env", "--allow-read=/render", "plugins/omnishell/server/render.ts"]
-	health: "http://127.0.0.1:8090/health"
+	health:  "http://127.0.0.1:8090/health"
 }
 
 // The stage that writes a door's served tree as a release
@@ -98,15 +98,16 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 	watch:  *false | bool
 }
 
-#Terminal: T={
+#Terminal: {
+	let T = self
 	app: string
 	// What a reader calls the app (a document's title, the sign-in's heading),
 	// where `app`, the name its services go by, is no word for a reader.
-	title?: string & != ""
+	title?: string & !=""
 	// Fills the entry page's meta description. Double quotes would close the
 	// attribute they land in.
 	description: string
-	description: !~ "\""
+	description: !~"\""
 	// What the entry document says it is in before any script runs. The shell
 	// rewrites it per screen once a locale is resolved, but a crawler that does
 	// not render and the paint before boot both read this one — so it is the
@@ -146,13 +147,13 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 			modes:     [...string]
 			providers: [...string]
 			identity:  string
-			chrome:   string
+			chrome:    string
 		}
 		auth: {
 			modes:     ["passkey", "guest"]
 			providers: ["google", "phone"]
-			identity: "generated"
-			chrome:   "<name · handle> · sign out; self.route and self.name are the app's"
+			identity:  "generated"
+			chrome:    "<name · handle> · sign out; self.route and self.name are the app's"
 		}
 
 		// What data-text-format may name without the app declaring anything.
@@ -161,15 +162,14 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// platform affordance and will differ from every other app for no
 		// reason a reader benefits from. The list is not closed — any other
 		// name is an app's own renderer, per `renderer` below.
-		"text-formats": [Name=string]: {renders: string, note: string}
-		"text-formats": plain:    {renders: "the column's text, placeholders interpolated", note: "the default when data-text-format is absent"}
-		"text-formats": datetime: {renders: "the moment in the reader's own language and clock (\"Aug 2, 09:00\" to an American, \"2 de ago., 09:00\" to a Brazilian)", note: "raw ISO / postgres timestamptz never reaches a reader; the zone is the reader's, except in the storybook, which pins UTC for the checks and for prerendered documents"}
-		"text-formats": date: {renders: "numeric year, two-digit month and day in the reader's language and timezone", note: "date-only YYYY-MM-DD is a civil date and never shifts; missing values are blank"}
-		"text-formats": time: {renders: "HH:mm in the reader's language and timezone", note: "h23 renders midnight as 00:00; missing values are blank"}
-		"text-formats": number:   {renders: "the number in the reader's own digits and grouping (\"1.234,5\" to a Brazilian)", note: "the column's ASCII spelling is nobody's"}
-		"text-formats": language: {renders: "the base language of a BCP 47 code in the reader's language (\"en-US\" becomes \"English\" to an American, \"inglês\" to a Brazilian)", note: "a value that is no language code, such as a custom language name, is shown as it is; missing values are blank"}
-		"text-formats": money:    {renders: "an integer count of minor units in its currency and the reader's language (\"R$ 189,00\" to a Brazilian, \"R$189.00\" to an American)", note: "the currency is the column's declaration (schema money: {currency, minorUnits}, or {currencyField}, a sibling holding `{code}_{decimals}`), never the attribute's; the amount reaches Intl as an exact decimal"}
-
+		"text-formats": [string]~(Name,_): {renders: string, note: string}
+		"text-formats": plain:             {renders: "the column's text, placeholders interpolated", note: "the default when data-text-format is absent"}
+		"text-formats": datetime:          {renders: "the moment in the reader's own language and clock (\"Aug 2, 09:00\" to an American, \"2 de ago., 09:00\" to a Brazilian)", note: "raw ISO / postgres timestamptz never reaches a reader; the zone is the reader's, except in the storybook, which pins UTC for the checks and for prerendered documents"}
+		"text-formats": date:              {renders: "numeric year, two-digit month and day in the reader's language and timezone", note: "date-only YYYY-MM-DD is a civil date and never shifts; missing values are blank"}
+		"text-formats": time:              {renders: "HH:mm in the reader's language and timezone", note: "h23 renders midnight as 00:00; missing values are blank"}
+		"text-formats": number:            {renders: "the number in the reader's own digits and grouping (\"1.234,5\" to a Brazilian)", note: "the column's ASCII spelling is nobody's"}
+		"text-formats": language:          {renders: "the base language of a BCP 47 code in the reader's language (\"en-US\" becomes \"English\" to an American, \"inglês\" to a Brazilian)", note: "a value that is no language code, such as a custom language name, is shown as it is; missing values are blank"}
+		"text-formats": money:             {renders: "an integer count of minor units in its currency and the reader's language (\"R$ 189,00\" to a Brazilian, \"R$189.00\" to an American)", note: "the currency is the column's declaration (schema money: {currency, minorUnits}, or {currencyField}, a sibling holding `{code}_{decimals}`), never the attribute's; the amount reaches Intl as an exact decimal"}
 
 		// The renderer role, and the terminal's DOM mutation story. A renderer
 		// is a pure (value) => nodes function; interpreter/render.js states why
@@ -184,42 +184,42 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		renderer: {
 			role:    string
 			returns: string
-			owns: [Name=string]: {is: string, note: string}
+			owns: [string]~(Name,_): {is: string, note: string}
 			note: string
 		}
 		renderer: {
 			role:    "jessie, evaluated in a compartment with nothing endowed, like handler and fold"
 			returns: "an array of nodes, where a node is a string (always text) or {tag, attrs?, children?}"
-			owns: schema: {is: "the node description", note: "there is no node kind for raw markup, so no renderer can ask for it and no value can smuggle it"}
-			owns: tags: {is: "a prose-element allowlist", note: "no script/style, no iframe/object/embed (that is the hatch, under a sandbox), no form/input (mutations are forms a screen author wrote), no svg/math"}
-			owns: attributes: {is: "a per-tag attribute allowlist", note: "on* and style refused; data-* refused hardest, since it is the terminal's own binding vocabulary and a renderer emitting one could forge a region, a binding or a hatch mount out of a reader's prose"}
-			owns: urls: {is: "the http/https/mailto scheme check", note: "applied by the builder whether or not the renderer consulted it; a refused URL drops the attribute rather than throwing, because a reader's content must not take the screen down"}
+			owns: schema:         {is: "the node description", note: "there is no node kind for raw markup, so no renderer can ask for it and no value can smuggle it"}
+			owns: tags:           {is: "a prose-element allowlist", note: "no script/style, no iframe/object/embed (that is the hatch, under a sandbox), no form/input (mutations are forms a screen author wrote), no svg/math"}
+			owns: attributes:     {is: "a per-tag attribute allowlist", note: "on* and style refused; data-* refused hardest, since it is the terminal's own binding vocabulary and a renderer emitting one could forge a region, a binding or a hatch mount out of a reader's prose"}
+			owns: urls:           {is: "the http/https/mailto scheme check", note: "applied by the builder whether or not the renderer consulted it; a refused URL drops the attribute rather than throwing, because a reader's content must not take the screen down"}
 			owns: reconciliation: {is: "the DOM write itself", note: "an unchanged description is not written at all, so a re-bind cannot cost the reader their text selection and idempotence is structural rather than each renderer's to earn"}
 			note: "a structural violation — unknown tag, malformed node, refused attribute — throws, because that is a bug in the renderer and not in anyone's data"
 		}
 
-		sensors: [Name=string]: {yields: string, note: string}
+		sensors: [string]~(Name,_):    {yields: string, note: string}
 		sensors: camera:               {yields: "captured frame (Blob), via a returned request", note: "one MediaStream per tab; CameraView is terminal chrome, not a mountable unit"}
 		sensors: microphone:           {yields: "captured audio clip (Blob), via a returned request", note: "getUserMedia's audio half"}
 		sensors: "screen-capture":     {yields: "a captured frame or recording (Blob), via a returned request", note: "getDisplayMedia"}
 		sensors: geolocation:          {yields: "{lat: number, lng: number, accuracy: number}, via a returned request", note: "one-shot read only"}
 		sensors: "device-orientation": {yields: "an orientation/acceleration reading", note: "fires continuously — blocked on Q3 (do subscriptions generalize?), declared but not yet grantable"}
 
-		background: [Name=string]: {yields: string, note: string}
+		background: [string]~(Name,_): {yields: string, note: string}
 		background: notifications:     {yields: "a shown notification, via a returned request", note: "Notifications API"}
 		background: push:              {yields: "a push subscription (endpoint + keys), via a returned request", note: "the push event itself fires in the service worker, never in a unit — blocked on service-worker registration support, not yet grantable"}
 		background: "background-sync": {yields: "a registered sync tag, via a returned request", note: "same service-worker-only firing as push — same block"}
 		background: "wake-lock":       {yields: "an active, auto-released wake lock, via a returned request", note: "Screen Wake Lock API"}
 
-		hardware: [Name=string]: {yields: string, note: string}
-		hardware: usb:       {yields: "a connected USB device handle, via a returned request", note: "WebUSB"}
-		hardware: hid:       {yields: "a connected HID device handle, via a returned request", note: "WebHID"}
-		hardware: serial:    {yields: "a connected serial port handle, via a returned request", note: "Web Serial"}
-		hardware: bluetooth: {yields: "a connected Bluetooth device handle, via a returned request", note: "Web Bluetooth"}
-		hardware: nfc:       {yields: "a scanned NFC tag reading, via a returned request", note: "Web NFC"}
+		hardware: [string]~(Name,_): {yields: string, note: string}
+		hardware: usb:               {yields: "a connected USB device handle, via a returned request", note: "WebUSB"}
+		hardware: hid:               {yields: "a connected HID device handle, via a returned request", note: "WebHID"}
+		hardware: serial:            {yields: "a connected serial port handle, via a returned request", note: "Web Serial"}
+		hardware: bluetooth:         {yields: "a connected Bluetooth device handle, via a returned request", note: "Web Bluetooth"}
+		hardware: nfc:               {yields: "a scanned NFC tag reading, via a returned request", note: "Web NFC"}
 
-		"os-bridge":    [Name=string]: {yields: string, note: string}
-		"network-peer": [Name=string]: {yields: string, note: string}
+		"os-bridge": [string]~(Name,_):    {yields: string, note: string}
+		"network-peer": [string]~(Name,_): {yields: string, note: string}
 
 		// Boundaries a unit can be given, named by ECMA-262's own words for
 		// them. They are not ordered, and each buys one thing:
@@ -249,8 +249,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// the rung #scale publishes as --min-touch, and the threshold
 		// check-visual.ts holds a tap target to. Held apart they can be moved
 		// apart, and then the rung is a lie visual lint still passes.
-		floors: [Name=string]: int
-		floors: touch: 24
+		floors: [string]~(Name,_): int
+		floors: touch:             24
 
 		// The terminal's hatch. Props in are the mount element's
 		// data-prop-* attributes, resolved against the row by the same binder
@@ -262,18 +262,18 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// `grants: []` is a true statement about an opaque origin and a false
 		// one about a same-origin worker, and `height` names a frame that an
 		// agent seat does not have.
-		hatch: [Boundary=string]: {
+		hatch: [string]~(Boundary,_): {
 			isolation: Boundary
 			mount:     string
 			props:     string
-			events: [Name=string]: {performs: string, note: string}
+			events: [string]~(Name,_): {performs: string, note: string}
 			// The one bound a seat holds every event's detail to whatever its
 			// shape: its size in bytes, hatch.js's DETAIL_BYTES, which pronto's
 			// vendored-unit test holds equal to this. Everything else is the
 			// payload shape the program declares beside each raised name.
 			detail: bytes: 10485760
 			grants: [...string]
-			note: string
+			note:   string
 		}
 		hatch: realm: {
 			mount: "data-hatch=\"<unit>\", naming an #App.capabilities.vendored entry"
@@ -287,8 +287,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 			// frame's permissions-policy `allow`: the browser asks the reader in
 			// the app's own name, and a unit that declares nothing gets nothing
 			// beyond its ports. hatch.js's REALM_GRANTS.
-			grants: ["geolocation"]
-			note: "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox, never allow-same-origin — the unit runs in an opaque origin and cannot reach this one. Props are delivered with targetOrigin \"*\", which an opaque origin leaves no alternative to, so a hatch is never given a secret"
+			grants: ["geolocation", "camera", "payment"]
+			note:   "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox (or with allow-same-origin allow-forms on a dedicated subdomain origin), never allow-same-origin on the app's own origin — the unit runs in an opaque or subdomain origin and cannot reach this one"
 		}
 		// The agent seat's second role: a presenter, a worker that only
 		// paints. `policy` is the worker script's own Content-Security-Policy,
@@ -307,9 +307,9 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// names each file a presenter uses, and the worker evaluates them
 		// before the prune.
 		presenter: {
-			policy: strings.TrimSpace(_presenterPolicy)
+			policy:   strings.TrimSpace(_presenterPolicy)
 			scripted: ["script", "worker", "sharedworker", "serviceworker"]
-			scripts: [URL=string]: =~"^sha(256|384|512)-"
+			scripts: [string]~(URL,_): =~"^sha(256|384|512)-"
 			scripts: {
 				"https://cdn.jsdelivr.net/npm/babylonjs@9.31.0/babylon.js":                       "sha384-GbwOam+gaf7GWvN708CvUiGqRFPFMS/lpYod2JfIip04KMa4TIJ8HXRjhwvT9DMC"
 				"https://cdn.jsdelivr.net/npm/babylonjs-loaders@9.31.0/babylonjs.loaders.min.js": "sha384-4Lrx0JNQdcaB2SaX4xPoA2b15Fnq+ZEdBNyjRNds6RUVsA5oVRIh9GoVvIQLwBJ4"
@@ -324,7 +324,7 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 			}
 			// The terminal grants a unit nothing at either boundary.
 			grants: []
-			note: "a classic same-origin Worker — its own thread, no DOM, and fetch/IndexedDB/the cache API intact. The port is the identity, so there is no origin check to make; the app's audit of the unit script and the pinned hash of what it loads are the whole boundary"
+			note:   "a classic same-origin Worker — its own thread, no DOM, and fetch/IndexedDB/the cache API intact. The port is the identity, so there is no origin check to make; the app's audit of the unit script and the pinned hash of what it loads are the whole boundary"
 		}
 	}
 
@@ -336,12 +336,12 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// it's #App's own generated file, nothing omnishell-specific about it.
 		entry: #Path
 		entry: *#Render.entry.source | string
-		css: #Path
-		css: *"shell/shell.css" | string
-		boot: #Path
-		boot: *"shell/boot.js" | string
-		sw: #Path
-		sw: *"offline-first-sw.js" | string
+		css:   #Path
+		css:   *"shell/shell.css" | string
+		boot:  #Path
+		boot:  *"shell/boot.js" | string
+		sw:    #Path
+		sw:    *"offline-first-sw.js" | string
 
 		assets: {
 			html: strings.Replace(strings.Replace(_entry, "{firstpaint_head}", _firstPaintHead, 1), "{firstpaint_body}", _firstPaintBody, 1)
@@ -349,9 +349,12 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 				strings.Replace(
 					strings.Replace(
 						strings.Replace(_shellHtmlAsset, "{description}", T.description, 1),
-						"{language}", T.language, 1),
-					"{direction}", T.direction, 1),
-				"{modulepreload}", _preloadHtml, 1), "{sharedstyles}", _sharedStyles, 1)
+						"{language}", T.language, 1,
+					),
+					"{direction}", T.direction, 1,
+				),
+				"{modulepreload}", _preloadHtml, 1,
+			), "{sharedstyles}", _sharedStyles, 1)
 			css:  _shellCssAsset
 			boot: *_bootJsAsset | string
 			sw:   _swJsAsset
@@ -425,8 +428,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// a consumer that keeps the terminal somewhere else states where by
 		// unifying these — which is the whole reason they are fields and not
 		// paths written into someone's source.
-		markupReader: #Path
-		markupReader: *"../../plugins/omnishell/read-markup.ts" | string
+		markupReader:     #Path
+		markupReader:     *"../../plugins/omnishell/read-markup.ts" | string
 		documentRenderer: #Path
 		documentRenderer: *"../../plugins/omnishell/render-documents.ts" | string
 		// The config the renderer runs under, whose lock pins everything it
@@ -457,8 +460,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		}
 		_firstPaintHead: [if firstPaint != _|_ {"<style data-first-paint>\(firstPaint.css)</style>\n<script data-first-paint>\(firstPaint.script)</script>\n"}, ""][0]
 		_firstPaintBody: [if firstPaint != _|_ {"\n<!--first-paint-->\(firstPaint.html)<!--/first-paint-->"}, ""][0]
-		machineSchema: #Path
-		machineSchema: *"../../plugins/omnishell/machine.cue" | string
+		machineSchema:   #Path
+		machineSchema:   *"../../plugins/omnishell/machine.cue" | string
 
 		// The entry page fetches the boot graph in parallel at t=0 instead of
 		// discovering each import a round-trip after its parent executes. The
@@ -495,7 +498,7 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 
 		modules: [...#Path]
 		modules: [
-			"shell.js", "cortex-navigation.js", "row-attachments.js", "machine-references.js", "machine-shape.js", "machine-engine.js", "observe-actor.js", "invoked-actors.js", "chrome.js", "screen.js", "fragment.js", "data-sync.js", "validate.js", "render.js",
+			"shell.js", "session-posture.js", "cortex-navigation.js", "row-attachments.js", "machine-references.js", "machine-shape.js", "machine-engine.js", "observe-actor.js", "invoked-actors.js", "chrome.js", "screen.js", "fragment.js", "data-sync.js", "validate.js", "render.js",
 			"release-plan.js", "early-gestures.js", "early-replay.js", "nav-feedback.js", "preloads.js", "link-prefetch.js", "markup.js", "script-url.js", "deferred-boot.js",
 			"host-dom.js", "hatch.js", "hatch-worker.js", "hatch-presenter.js", "presenter-realm.js", "presenter.js",
 			"storybook.js", "jessie.js", "statechart.js", "kinetic.js", "kinetic-milestones.js", "kinetic-session.js", "kinetic-sound.js", "kinetic-mount.js", "rtc-channel.js", "prng.js",
@@ -507,9 +510,9 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// A stylesheet every screen imports defines the frame before any screen
 		// loads. Route-specific imports remain with their screen.
 		_sharedStyles: strings.Join([for p in shared if len(screens) > 0
-			if len([for s in screens if !list.Contains(s.shared, p) {s.name}]) == 0 {
-				"<link rel=\"stylesheet\" href=\"../\(p)\">"
-			}], "\n")
+		if len([for s in screens if !list.Contains(s.shared, p) {s.name}]) == 0 {
+			"<link rel=\"stylesheet\" href=\"../\(p)\">"
+		}], "\n")
 
 		handlers: [...#Jessie]
 		handlers: *[] | [...#Jessie]
@@ -568,8 +571,8 @@ _presenterPolicy: _ @embed(file="presenter-security-policy.txt", type=text)
 		// `verb` is the cheapest layer that can answer each. The loop owns this
 		// vocabulary; it is restated here because omnishell is consumed on its
 		// own and cannot import a sibling plugin.
-		verbs: [Name=string]: {verb: "setup" | "generate" | "build" | "launch" | "release", cmds: [...string], note: string}
-		checks: [Name=string]: {verb: "lint" | "test" | "integrate", cmds: [...string], note: string}
+		verbs: [string]~(Name,_):  {verb: "setup" | "generate" | "build" | "launch" | "release", cmds: [...string], note: string}
+		checks: [string]~(Name,_): {verb: "lint" | "test" | "integrate", cmds: [...string], note: string}
 		checks: visual: {
 			// A laid-out page over real content, so the cluster has to be up
 			// however cheap `lint` would look. The runtime comes up fresh in

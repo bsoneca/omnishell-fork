@@ -83,7 +83,7 @@ async function serve(authenticated = false, automaticGuest = false, promoteTo?: 
     const region = '<div data-live="trigger" data-on-mutation="home"><template data-item><span data-text="{id}"></span></template></div>'
     files.set("shell/screens/home.html", screen("home").replace("</section>", `${region}</section>`))
     files.set("shell/index.html", files.get("shell/index.html")!.replace(screen("home"), screen("home").replace("</section>", `${region}</section>`)))
-    files.set("shell/handlers/home.js", `(state) => ({ updates: state.items.map(row => ({ op: "put", entity: "result", id: row.id, row: { id: row.id, value: row.value } })) })`)
+    files.set("shell/handlers/home.js", `({ context }) => ({ updates: context.items.map(row => ({ op: "put", entity: "result", id: row.id, row: { id: row.id, value: row.value } })) })`)
 
   }
   if (transition.coldBoot) {
@@ -116,9 +116,9 @@ async function serve(authenticated = false, automaticGuest = false, promoteTo?: 
     files.set("shell/shell.json", JSON.stringify(config))
     files.set("shell/screens/delayed.html", `<section class="screen" data-screen="delayed"><div data-live="held" data-empty=""><template data-item><p data-text="{id}"></p></template></div><div data-live="probe" data-filter="id=eq.seat" data-empty-row='{"id":"seat","value":""}' data-on-mutation="delayed"><template data-item><p data-text="{id}"></p></template></div></section>`)
     files.set("shell/screens/delayed.css", "")
-    files.set("shell/handlers/delayed.js", `(state, event) => event.type === "later"
+    files.set("shell/handlers/delayed.js", `({ context, event }) => event.type === "later"
       ? { updates: [{ op: "put", entity: "later", id: "later", row: { id: "later", value: "written" } }] }
-      : state.rows.probe?.[0]?.value ? { updates: [] }
+      : context.rows.probe?.[0]?.value ? { updates: [] }
       : { updates: [{ op: "put", entity: "probe", id: "seat", row: { id: "seat", value: "asked" } }], then: { type: "later", delay: 1 } }`)
   }
   if (transition.hatches) {
@@ -155,7 +155,7 @@ async function serve(authenticated = false, automaticGuest = false, promoteTo?: 
     if (transition.chainRedirect || transition.chainDelay) {
       files.set("shell/screens/resolver.html", `<section class="screen" data-screen="resolver"><p>Resolving destination</p><div data-live="probe" data-filter="id=eq.route" data-on-mutation="redirect" data-read-marker="marker?limit=1"><span data-text="{id}"></span></div></section>`)
       const next = transition.chainDelay ? '{ type: "later", delay: 0.1 }' : '{ type: "intent:navigate", with: { route: "other", replace: true } }'
-      files.set("shell/handlers/redirect.js", `(world, event) => event.type === "later" ? { updates: [{ op: "put", entity: "later", id: "result", row: { id: "result" } }] } : world.items[0]?.value === "ready" ? { then: ${next} } : { updates: [{ op: "put", entity: "probe", id: "route", row: { id: "route", value: "ready" } }] }`)
+      files.set("shell/handlers/redirect.js", `({ context: world, event }) => event.type === "later" ? { updates: [{ op: "put", entity: "later", id: "result", row: { id: "result" } }] } : world.items[0]?.value === "ready" ? { then: ${next} } : { updates: [{ op: "put", entity: "probe", id: "route", row: { id: "route", value: "ready" } }] }`)
     } else files.set("shell/handlers/redirect.js", `() => ({ updates: [{ op: "put", entity: "probe", id: "route", row: { id: "route" } }], then: { type: "intent:navigate", with: { route: "other", replace: true } } })`)
   }
   if (transition.cortex) {
@@ -192,7 +192,7 @@ async function serve(authenticated = false, automaticGuest = false, promoteTo?: 
       card.files.handlers = ["shell/handlers/isReady.js"]
       config.local.flag = "tab"
       config.schema = { flag: { fields: [{ name: "id", type: "string", pk: true }, { name: "status", type: "string" }, { name: "trigger", type: "string" }] } }
-      files.set("shell/handlers/isReady.js", `(state) => state.items[0]?.trigger === "yes"`)
+      files.set("shell/handlers/isReady.js", `({ context }) => context.items[0]?.trigger === "yes"`)
       files.set("shell/screens/card.html", files.get("shell/screens/card.html")!.replace(' data-retarget-params="card"', "").replace("</section>", `<div data-lease data-live="flag" data-filter="id=eq.{param.card}" data-status="{status}" data-cortex="cardRows" data-machine='${JSON.stringify(chart)}'></div></section>`))
     }
     config.cortex = { config: { initial: "routing", states, on }, actors }
@@ -1591,5 +1591,24 @@ describe("Cortex navigation", () => {
       })
     } finally { await server.close() }
   })
+
+  // cortex-navigation.js carries xstate: an app with neither a cortex nor an auth never asks for it.
+  for (const [name, authenticated] of [["a plain app never loads", false], ["an app with auth loads", true]] as const) {
+    it(`${name} cortex-navigation.js and xstate`, async () => {
+      const server = await serve(authenticated)
+      try {
+        await withPage(async page => {
+          const asked: string[] = []
+          page.on("request", request => asked.push(new URL(request.url()).pathname))
+          await page.addInitScript(() => sessionStorage.setItem("pronto-token", JSON.stringify({ token: "userA", user: { id: "A", handle: "User A", guest: true } })))
+          await page.goto(server.base)
+          await ready(page, "A")
+          const lifecycle = asked.filter(path => /cortex-navigation|xstate/.test(path))
+          if (authenticated) expect(lifecycle.some(path => /cortex-navigation/.test(path))).toBe(true)
+          else expect(lifecycle).toEqual([])
+        })
+      } finally { await server.close() }
+    })
+  }
 
 })

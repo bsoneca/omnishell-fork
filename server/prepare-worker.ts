@@ -50,7 +50,7 @@ export async function prepareWorker(publicDir: string, generated: string) {
   const statechartPath = path.relative(generated, fileURLToPath(new URL('../interpreter/statechart.js', import.meta.url))).split(path.sep).join('/')
   const sync = jessie.replace('export async function evaluateCaged(', 'export function evaluateCaged(')
     .replace('let statechart;', `import { Statechart as statechart } from ${JSON.stringify(statechartPath.startsWith('.') ? statechartPath : './' + statechartPath)};`)
-    .replace('await loadStatechart();', '')
+    .replace('await loadStatechart();', 'void 0;')
     .replace('new URL("./vendor/ses.umd.min.js", import.meta.url).href', '"startup-compiled-ses"')
     .replace('export async function evaluateRole(', 'export function evaluateRole(')
     .replaceAll('await ensureSes();', 'if (!globalThis.__prontoLockdown) throw new Error("SES not initialized");')

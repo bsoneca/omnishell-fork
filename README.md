@@ -15,7 +15,7 @@ application code only declares screens and derives writes.
 > **Writing an app? Start with [GUIDE.md](GUIDE.md).** It covers the
 > reduce contract, what wakes it and what it receives, the rules that bite, and
 > the mappings to Elm/TEA, Datalog, htmx and Datomic. `apps/shadcnui` is the
-> worked gallery for the presentation vocabulary; `apps/chess` is the reference
+> worked gallery for the presentation vocabulary; `apps/truco` is the reference
 > for the data plane.
 
 ## The runtime
@@ -27,7 +27,7 @@ application code only declares screens and derives writes.
 | The reduce sandbox and its denylist | `plugins/pronto/jessie.ts` |
 | What may be declared: entities, screens, forms, seeds | `plugins/pronto/schema.cue` |
 | Emission — markup, `shell.yaml`, compose, docker | `plugins/pronto/write.ts` |
-| Design tokens and presets | `plugins/pronto/styles.ts`, `apps/shadcnui` |
+| Design tokens and roles | `plugins/pronto/styles.ts`, `apps/shadcnui` |
 | Terminal doctrine, the event surface, the arguments | [`docs/`](docs/) |
 | Unbreakable machines, effect safety, and verification | [`docs/machines.md`](docs/machines.md) |
 | Every `data-*`, with its meaning | [`REFERENCE.md`](REFERENCE.md) |
@@ -44,7 +44,7 @@ project's `.mise.toml` and `omnishell` is on PATH:
 
 ```toml
 [tools]
-"github:bonisoft3/omnishell" = "0.19.0"
+"github:bonisoft3/omnishell" = "0.25.0"
 ```
 
 ```

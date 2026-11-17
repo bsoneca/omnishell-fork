@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { prepareWorker, roleFactory } from '../server/prepare-worker.ts'
-import { evaluateRole } from '../interpreter/jessie.js'
+import { ensureSes, evaluateRole } from '../interpreter/jessie.js'
 
 Deno.test('startup role factories isolate request closures and reject global retention', async () => {
   const factory = await evaluateRole(roleFactory('let value; (input) => { const previous = value; value = input; return previous; }', 'handler'))
@@ -19,12 +19,34 @@ Deno.test('worker startup resolves Statechart and preserves role grants', async 
   try {
     await Deno.mkdir(`${root}/public/shell/handlers`, { recursive: true })
     await Deno.writeTextFile(`${root}/public/shell/shell.json`, JSON.stringify({ routes: [{files: {handlers: ['shell/handlers/step.js']}}], endowments: {'shell/handlers/step.js': ['Statechart']} }))
-    await Deno.writeTextFile(`${root}/public/shell/handlers/step.js`, '(state) => state')
+    await Deno.writeTextFile(`${root}/public/shell/handlers/step.js`, '({ context }) => context')
     await prepareWorker(`${root}/public`, `${root}/generated`)
     const startup = await import(`file://${root}/generated/jessie-startup.js`)
     assert.equal(typeof startup.SAFE_ENDOWMENTS.Statechart, 'function')
     const roles = JSON.parse(await Deno.readTextFile(`${root}/generated/roles.json`))
     assert.deepEqual(roles[0].endowments, ['Statechart'])
+  } finally {
+    await Deno.remove(root, { recursive: true })
+  }
+})
+
+Deno.test('worker startup compiles a role without Statechart endowment correctly', async () => {
+  const root = await Deno.makeTempDir()
+  try {
+    await Deno.mkdir(`${root}/public/shell/handlers`, { recursive: true })
+    await Deno.writeTextFile(`${root}/public/shell/shell.json`, JSON.stringify({ routes: [{files: {handlers: ['shell/handlers/plain.js']}}], endowments: {'shell/handlers/plain.js': []} }))
+    await Deno.writeTextFile(`${root}/public/shell/handlers/plain.js`, '({ event }) => event')
+    await prepareWorker(`${root}/public`, `${root}/generated`)
+    const startup = await import(`file://${root}/generated/jessie-startup.js`)
+    // The startup module must still work: Statechart is present as a SAFE_ENDOWMENT.
+    assert.equal(typeof startup.SAFE_ENDOWMENTS.Statechart, 'function')
+    // And a role with no Statechart endowment must evaluate through the generated startup under lockdown.
+    await ensureSes()
+    const handler = startup.evaluateRole('({ event }) => event', 'handler', [])
+    assert.equal(typeof handler, 'function')
+    assert.equal(handler({ event: 'ping' }), 'ping')
+    const roles = JSON.parse(await Deno.readTextFile(`${root}/generated/roles.json`))
+    assert.deepEqual(roles[0].endowments, [])
   } finally {
     await Deno.remove(root, { recursive: true })
   }

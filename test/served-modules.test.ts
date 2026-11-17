@@ -6,6 +6,7 @@
 // other suite sees it: deno reads these files off the filesystem by path, so
 // the suites pass over a set the door does not carry.
 import { describe, expect, it } from "@test/harness"
+import { staticClosure } from "./import-closure.ts"
 
 const interpreter = new URL("../interpreter/", import.meta.url)
 
@@ -56,5 +57,21 @@ describe("the interpreter's served modules", () => {
       }
     }
     expect(missing).toEqual([])
+  })
+
+  it("keeps xstate out of the entry's static closure while the modules that bind it stay preloaded", async () => {
+    const cue = await Deno.readTextFile(new URL("../terminal.cue", import.meta.url))
+    const skip = new Set([...cue.match(/_preloadSkip:\s*\{([^}]*)\}/)![1].matchAll(/"([^"]+)":\s*true/g)].map((m) => m[1]))
+    // A preload only fetches bytes; the dynamic import keeps evaluation lazy, so these are not skipped.
+    const entry = await staticClosure("shell.js")
+    expect(entry.has("vendor/xstate.js")).toBe(false)
+    const list = await declared()
+    // The entry's own closure is never skipped but for what a first paint does not need; session-posture is served, not skipped.
+    expect(list.has("session-posture.js")).toBe(true)
+    expect(skip.has("session-posture.js")).toBe(false)
+    for (const m of ["cortex-navigation.js", "vendor/xstate.js", "row-attachments.js", "machine-engine.js", "statechart.js"]) {
+      expect(list.has(m)).toBe(true)
+      expect(skip.has(m)).toBe(false)
+    }
   })
 })
