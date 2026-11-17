@@ -32,18 +32,31 @@ const authPosture = (session, promote = false) => {
   if (session.user?.guest) return promote && !session.committed ? "anonymous" : "guest";
   return "user";
 };
-// The lifecycle of an app where no session can exist: it holds what it is given and starts no ceremony.
-const inertSessionLifecycle = (initial, promote) => {
+// The lifecycle of an app where no session can exist yet. It holds what it is given, answers session(), posture()
+// and busy() over that, and starts nothing. An app with an auth service passes `load`: the first ceremony call (sign-in,
+// register, sign-out, commit) builds the real lifecycle from the held session, and it and every later call go to it.
+// An app with no auth at all passes none and stays inert.
+const stoodInSessionLifecycle = (initial, promote, load = null) => {
   let held = initial;
+  let real = null;
+  let loading = null;
+  const delegate = (name, inert) => async (...args) => {
+    if (load === null) return inert(...args);
+    real ??= await (loading ??= load(held));
+    return real[name](...args);
+  };
   return {
-    session: () => held,
-    setSession: (s) => { held = s; },
-    posture: () => authPosture(held, promote),
-    busy: () => false,
-    commitGuest: async () => held,
-    signOut: async () => ({ mode: "reload" }),
-    signInPasskey: async () => ({ status: "stopped" }),
-    registerPasskey: async () => ({ status: "stopped" }),
+    session: () => real?.session() ?? held,
+    setSession: (s) => {
+      held = s;
+      real?.setSession(s);
+    },
+    posture: () => real?.posture() ?? authPosture(held, promote),
+    busy: () => real?.busy() ?? false,
+    commitGuest: delegate("commitGuest", async () => held),
+    signOut: delegate("signOut", async () => ({ mode: "reload" })),
+    signInPasskey: delegate("signInPasskey", async () => ({ status: "stopped" })),
+    registerPasskey: delegate("registerPasskey", async () => ({ status: "stopped" })),
   };
 };
 export { routeAt } from "./fragment.js";
@@ -1250,9 +1263,8 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     let signOut = null;
     let localizeCurrentStrip = null;
     const sessionCanExist = Boolean(cfg.auth?.required) || (cfg.tables?.length ?? 0) > 0;
-    const createSessionLifecycle = sessionCanExist ? (await import("./cortex-navigation.js")).createSessionLifecycle : null;
-    const sessionLifecycle = createSessionLifecycle === null ? inertSessionLifecycle(session, offersGuest(cfg)) : createSessionLifecycle({
-      session,
+    const lifecycleOptions = (initial) => ({
+      session: initial,
       promote: offersGuest(cfg),
       required: Boolean(cfg.auth?.required),
       ensureSession: () => session ?? (guestSession ? guestSession : Promise.resolve(null)),
@@ -1267,6 +1279,12 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       hasKnownPasskeys: (rpId) => knownPasskeys(rpId ?? globalThis.location?.hostname).length > 0,
       isProviderHinted: providerHinted,
     });
+    // Where no session can exist yet, the statechart waits for the first ceremony (an app with an auth service) or never loads.
+    const sessionLifecycle = sessionCanExist
+      ? (await import("./cortex-navigation.js")).createSessionLifecycle(lifecycleOptions(session))
+      : stoodInSessionLifecycle(session, offersGuest(cfg), cfg.auth
+        ? async (held) => (await import("./cortex-navigation.js")).createSessionLifecycle(lifecycleOptions(held))
+        : null);
     if (guestSession) {
       guestSession = guestSession.then((s) => {
         if (session === s) sessionLifecycle.setSession(s);
