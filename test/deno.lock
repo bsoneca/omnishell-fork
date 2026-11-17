@@ -1751,7 +1751,6 @@
     }
   },
   "remote": {
-    "http://localhost:58742/shell/hatches/lifecycle.js": "7babbd9c9bc3b9e1791dd22d4d46debade6918455c56c338f6a84ffebfd1490f",
     "https://cdn.jsdelivr.net/npm/ses@1.15.0/dist/ses.umd.min.js": "d6a22c7c6dea2a8e9b1ea8613e649c8ae58aec86ad677a7118fdf0e19678a468"
   },
   "workspace": {
