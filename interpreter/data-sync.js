@@ -23,7 +23,7 @@ import {
   not,
   or,
 } from "./vendor/mecha-client.js";
-import { canCoalesceSchemaEq, coalesceReads, columnOrder, compareBy, embedDeps, embedTables, parseFilter, parseFilterSpec, parseLimit, parseSelect, ProgramError, progressiveReadsComment, routeOf, stripProgressiveReads, takeProgressiveReads } from "./fragment.js";
+import { canCoalesceSchemaEq, coalesceReads, columnOrder, compareBy, embedDeps, embedTables, parseFilter, parseFilterSpec, parseLimit, parseSelect, ProgramError, progressiveReadsComment, routeOf, stripProgressiveReads, takeProgressiveReads, TransientRead } from "./fragment.js";
 export { progressiveReadsComment, stripProgressiveReads, takeProgressiveReads };
 import { evaluateRole } from "./jessie.js";
 import { judge } from "./validate.js";
@@ -217,7 +217,11 @@ async function send(url, init, retried = false) {
   let res;
   let conflicted = false;
   for (let sent = 1; ; sent++) {
-    res = await fetch(url, init);
+    // A fetch that nothing answered (the door unreachable) is marked, so http() calls only that an outage.
+    res = await fetch(url, init).catch((err) => {
+      if (err instanceof TypeError) err.unanswered = true;
+      throw err;
+    });
     conflicted = res.status === 500 && (await res.clone().text()).includes('"code":"40001"');
     if (!conflicted || sent >= CONFLICT_SENDS) break;
     await new Promise((resolve) => setTimeout(resolve, CONFLICT_FIRST_MS * 2 ** (sent - 1)));
@@ -268,11 +272,15 @@ export async function http(url, init) {
   const headers = { ...init?.headers };
   const t = token();
   if (t) headers.Authorization = `Bearer ${t}`;
-  const { res, conflicted } = await send(url, { ...init, headers });
+  // fetch rejects with a TypeError when nothing answered (the door unreachable): an outage, asked again.
+  const { res, conflicted } = await send(url, { ...init, headers }).catch((err) => {
+    throw err instanceof TypeError && err.unanswered ? new TransientRead(`nothing answered ${url}: ${err.message}`, { cause: err }) : err;
+  });
   if (!res.ok) {
     const method = init?.method ?? "GET";
     const detail = await res.text();
-    const err = new Error(`${res.status} ${method} ${url}${detail === "" ? "" : `: ${detail}`}`);
+    const message = `${res.status} ${method} ${url}${detail === "" ? "" : `: ${detail}`}`;
+    const err = res.status >= 500 || res.status === 408 || res.status === 429 ? new TransientRead(message) : new Error(message);
     if (method !== "GET" && (conflicted || (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429))) {
       err.name = "NonRetriableError";
     }
@@ -1227,7 +1235,7 @@ export function createStore(base = "", cfg = {}, { request = http, schedule: enq
           return done(reject, new ProgramError(`the stack refused a subset of ${failure.table}: ${failure.error.message}`));
         }
         if (exhausted(entry)) {
-          return done(reject, new Error(`a subset of ${failure.table} failed ${RETRY_ATTEMPTS + 1} times in a row: ${failure.error?.message ?? failure.error}`, { cause: failure.error }));
+          return done(reject, new TransientRead(`a subset of ${failure.table} failed ${RETRY_ATTEMPTS + 1} times in a row: ${failure.error?.message ?? failure.error}`, { cause: failure.error }));
         }
         if (failure !== undefined) return;
         if (view.status === "error") return done(reject, new Error(`a view of ${view.id} failed`));

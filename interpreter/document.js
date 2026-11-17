@@ -83,6 +83,7 @@ export async function renderDocument({
   here,
   onHead,
   onChunk,
+  preloadPrefix = "",
 }) {
   if (typeof origin !== "string") throw new Error("a document's links are absolute, and no origin was given to spell them against");
   const doc = parse(await withoutFirstPaint(entry));
@@ -101,7 +102,7 @@ export async function renderDocument({
     witness.setAttribute("name", "pronto-cas");
     witness.setAttribute("content", cas);
     doc.head.append(witness);
-    preloadScreen(doc, appBase, route);
+    preloadScreen(doc, appBase, route, { prefix: preloadPrefix });
     deferBoot(doc);
   };
   const uncomment = (node) => {
@@ -137,6 +138,8 @@ export async function renderDocument({
       // A moment is drawn in one zone for every reader, and UTC is the one no
       // reader's machine decides; the shell's render re-draws it in theirs.
       timeZone: "UTC",
+      // One answer, no retry after it: an outage fails the render rather than ship a page missing its rows.
+      outage: "fail",
       // Nothing is mounted where nothing runs: a unit's frame or worker
       // belongs to the shell, which mounts it into the screen it takes over.
       mountUnits: false,

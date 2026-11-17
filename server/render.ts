@@ -557,6 +557,8 @@ export async function serve(env: (name: string) => string | undefined = (name) =
           rows: true,
           origin: base.origin,
           here: base.pathname,
+          // The door's own path (behind a sidecar) is not part of a reader's address: the preloads leave it off.
+          preloadPrefix: appBase.pathname.replace(/\/$/, ""),
         }), (late) => late.handle.stop(), doorTimeout);
       } finally {
         drawn?.handle.stop();
