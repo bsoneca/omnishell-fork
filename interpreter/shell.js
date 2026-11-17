@@ -26,7 +26,7 @@ import { replayEarlyGestures, takeEarlyGestures } from "./early-replay.js";
 import { navFeedback } from "./nav-feedback.js";
 import { authPosture } from "./session-posture.js";
 export { authPosture, SESSION_LIFECYCLE_CHART } from "./session-posture.js";
-// cortex-navigation.js (xstate) is loaded lazily when the app's config requires it (see loadSessionLifecycle).
+// cortex-navigation.js (xstate) is loaded lazily when the app's config requires it (see needsLifecycle).
 export { routeAt } from "./fragment.js";
 import { assetURL, preloadLinkedScreens, preloadScreen, releaseOf, setRelease } from "./preloads.js";
 import { startLinkPrefetch } from "./link-prefetch.js";
@@ -656,6 +656,10 @@ function syncAuthDOM(nav, session, opts = {}) {
 /** Hands the guest to the auth service before a provider's link is followed, catching failures so the sign-in
  *  proceeds even when the adoption POST fails. Shared by strip and document-level provider handlers. */
 export const ADOPT_TIMEOUT_MS = 5000;
+// One adoption at a time for the whole shell: the strip's provider links and the document's [data-auth-provider]
+// controls share it, so a click on one while the other's adopt POST is pending is no second POST and no second redirect.
+let adoptionInFlight = false;
+
 export async function adoptGuestSafe(cfg, session, fetchFn = globalThis.fetch, timeoutMs = ADOPT_TIMEOUT_MS) {
   // The wait for the session and for the POST is bounded: past it the sign-in proceeds without the handoff.
   const ctl = new AbortController();
@@ -692,17 +696,16 @@ function renderPromote(lifecycle, cfg, chrome, served = null, getSession = null,
   // A provider's way in is a link that leaves the page: where the app asks it (auth.adoptGuest), the guest is handed to
   // the auth service first, then the link is followed. A modified click (a new tab) is the browser's own.
   if (cfg.auth?.adoptGuest) {
-    let adopting = false;
     for (const link of box.querySelectorAll(".shell-provider")) {
       link.addEventListener("click", async (event) => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
-        if (adopting) return;
-        adopting = true;
+        if (adoptionInFlight) return;
+        adoptionInFlight = true;
         try {
           await adoptGuestSafe(cfg, getSession, globalThis.fetch);
         } finally {
-          adopting = false;
+          adoptionInFlight = false;
         }
         location.assign(link.href);
       });
@@ -1103,6 +1106,8 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     const cfg = configUrl.pathname.endsWith(".json")
       ? JSON.parse(text)
       : (await import("./vendor/js-yaml.js")).load(text);
+    // Start the fetch at once when the app needs it; the await comes where the module is used.
+    const lifecycleImport = cfg.cortex !== undefined || cfg.auth !== undefined ? import("./cortex-navigation.js") : null;
     // Row attachments are paid for by an app that declares a cortex, and by no
     // other. (cortex-navigation loads only for a cortex or an auth: see needsLifecycle.)
     const rowAttachments = cfg.cortex === undefined ? undefined : (await import("./row-attachments.js")).createRowAttachments(Object.fromEntries(Object.entries(cfg.cortex.actors ?? {}).filter(([, binding]) => binding.via === "rows")));
@@ -1269,7 +1274,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     // cortex-navigation.js. A tables-only app does mint a guest with neither set; that session
     // has no lifecycle, which is why every use of it below is guarded.
     const needsLifecycle = cfg.cortex !== undefined || cfg.auth !== undefined;
-    const lifecycleModule = needsLifecycle ? await import("./cortex-navigation.js") : null;
+    const lifecycleModule = needsLifecycle ? await lifecycleImport : null;
     const createSessionLifecycleFn = lifecycleModule?.createSessionLifecycle ?? null;
     const sessionLifecycle = createSessionLifecycleFn
       ? createSessionLifecycleFn({
@@ -1588,19 +1593,18 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       }
       location.reload();
     };
-    let adopting = false;
     document.addEventListener("click", async (e) => {
       const providerEl = e.target?.closest?.("[data-auth-provider]");
       if (providerEl && cfg.auth?.service) {
         if (providerEl.localName !== "label") e.preventDefault();
         if (sessionLifecycle?.busy()) return;
-        if (adopting) return;
+        if (adoptionInFlight) return;
         if (cfg.auth?.adoptGuest) {
-          adopting = true;
+          adoptionInFlight = true;
           try {
             await adoptGuestSafe(cfg, currentSession, globalThis.fetch);
           } finally {
-            adopting = false;
+            adoptionInFlight = false;
           }
         }
         const provider = providerEl.dataset.authProvider;
@@ -2307,11 +2311,4 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     banner(err);
     throw err;
   }
-}
-
-/** The session lifecycle machine, loaded on demand: cortex-navigation.js carries xstate, which shell.js does not
- *  import statically. Async, unlike cortex-navigation.js's own sync `createSessionLifecycle`. */
-export async function loadSessionLifecycle(...args) {
-  const mod = await import("./cortex-navigation.js");
-  return mod.createSessionLifecycle(...args);
 }

@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import { authPosture, createCortexNavigation, createSessionLifecycle, SESSION_LIFECYCLE_CHART } from "./cortex-navigation.js";
+import { staticClosure } from "../test/import-closure.ts";
 
 const screen = () => ({ initial: "loading", states: {
   loading: { invoke: { src: "navigation", onDone: "ready", onError: "failed" } }, ready: {}, failed: {},
@@ -401,25 +402,9 @@ Deno.test("session lifecycle: passkey refusal, recovery offer, explicit registra
 });
 
 Deno.test("shell.js has no static dependency on vendor/xstate.js", async () => {
-  // Walk the static import closure from shell.js: `import ... from`, `export ... from` and bare `import "x"`,
-  // multi-line included. Dynamic import() calls are not followed; they are how xstate stays lazy.
-  const staticSpecs = (src: string) => [
-    ...src.matchAll(/(?:^|[\n;])\s*(?:import|export)\b[^;"']*?\bfrom\s*["']([^"']+)["']/g),
-    ...src.matchAll(/(?:^|[\n;])\s*import\s*["']([^"']+)["']/g),
-  ].map((m) => m[1]);
+  // Dynamic import() calls are not followed; they are how xstate stays lazy.
   const root = new URL("../interpreter/", import.meta.url);
-  const seen = new Set<string>();
-  const queue = ["shell.js"];
-  while (queue.length > 0) {
-    const name = queue.shift()!;
-    if (seen.has(name)) continue;
-    seen.add(name);
-    const src = await Deno.readTextFile(new URL(name, root));
-    for (const spec of staticSpecs(src)) {
-      if (!spec.startsWith("./")) continue;
-      queue.push(new URL(spec, new URL(name, root)).href.slice(root.href.length));
-    }
-  }
+  const seen = await staticClosure("shell.js");
   assertEquals(seen.has("vendor/xstate.js"), false, `shell.js statically reaches vendor/xstate.js: ${[...seen].join(", ")}`);
   assertEquals(seen.has("cortex-navigation.js"), false, `shell.js statically reaches cortex-navigation.js: ${[...seen].join(", ")}`);
   const src = await Deno.readTextFile(new URL("shell.js", root));

@@ -162,8 +162,8 @@ Deno.test({
     click(app, app.document.getElementById("provider"))
     click(app, app.document.getElementById("provider"))
     await settle(250)
-    expect(app.adopted.length).toBe(2)
+    expect(app.adopted.length).toBe(1)
     expect(app.events.filter((e) => e === `assign ${link.href}`).length).toBe(1)
-    expect(app.events.filter((e) => e.startsWith("href ")).length).toBe(1)
+    expect(app.events.filter((e) => e.startsWith("href ")).length).toBe(0)
   },
 })
