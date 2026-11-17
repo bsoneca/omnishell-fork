@@ -1592,4 +1592,23 @@ describe("Cortex navigation", () => {
     } finally { await server.close() }
   })
 
+  // cortex-navigation.js carries xstate: an app with neither a cortex nor an auth never asks for it.
+  for (const [name, authenticated] of [["a plain app never loads", false], ["an app with auth loads", true]] as const) {
+    it(`${name} cortex-navigation.js and xstate`, async () => {
+      const server = await serve(authenticated)
+      try {
+        await withPage(async page => {
+          const asked: string[] = []
+          page.on("request", request => asked.push(new URL(request.url()).pathname))
+          await page.addInitScript(() => sessionStorage.setItem("pronto-token", JSON.stringify({ token: "userA", user: { id: "A", handle: "User A", guest: true } })))
+          await page.goto(server.base)
+          await ready(page, "A")
+          const lifecycle = asked.filter(path => /cortex-navigation|xstate/.test(path))
+          if (authenticated) expect(lifecycle.some(path => /cortex-navigation/.test(path))).toBe(true)
+          else expect(lifecycle).toEqual([])
+        })
+      } finally { await server.close() }
+    })
+  }
+
 })

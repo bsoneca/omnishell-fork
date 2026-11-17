@@ -660,9 +660,11 @@ export async function adoptGuestSafe(cfg, session, fetchFn = globalThis.fetch) {
   }
 }
 
-function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = null, signOut = null) {
+function renderPromote(lifecycle, cfg, chrome, served = null, getSession = null, signOut = null) {
   const box = served?.querySelector(".shell-signin, .shell-provider") ? served : guestBox(document, cfg);
-  syncGuestChrome(box, initialSession, { signOut, chrome, cfg });
+  // Painted from the session as it stands: a getter may answer a guest still being minted, which paints as none.
+  const now = typeof getSession === "function" ? getSession() : null;
+  syncGuestChrome(box, typeof now?.then === "function" ? null : now, { signOut, chrome, cfg });
   const openModalIfPresent = (e) => {
     const trigger = document.querySelector(".shell-screen:not([hidden]) [data-auth-trigger], .shell-screen:not([hidden]) #btn-top-login");
     if (!trigger) return false;
@@ -683,7 +685,7 @@ function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = n
       link.addEventListener("click", async (event) => {
         if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         event.preventDefault();
-        await adoptGuestSafe(cfg, () => Promise.resolve(initialSession), globalThis.fetch);
+        await adoptGuestSafe(cfg, getSession, globalThis.fetch);
         location.assign(link.href);
       });
     }
@@ -694,7 +696,7 @@ function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = n
     return box;
   }
   const authenticate = async (button, kind) => {
-    if (lifecycle.busy()) return;
+    if (!lifecycle || lifecycle.busy()) return;
     if (signIn) signIn.disabled = true;
     if (create) create.disabled = true;
     let outcome;
@@ -725,14 +727,14 @@ function renderPromote(lifecycle, cfg, chrome, served = null, initialSession = n
   create?.addEventListener("click", () => authenticate(create, "register"));
   return box;
 }
-function renderSession(session, cfg, store, signOut, chrome, served = null, lifecycle = null) {
+function renderSession(session, cfg, store, signOut, chrome, served = null, lifecycle = null, getSession = () => session) {
   // A guest keeps a way in to gain: a passkey's one gesture signs in to the
   // passkey's account where the device has one, and otherwise makes one of
   // this guest, keeping what it wrote; a provider's signs in as the person it
   // links. A served document's strip already holds that box (document.js), and
   // it is the one bound.
   if (session.user.guest && offersGuest(cfg)) {
-    return renderPromote(lifecycle, cfg, chrome, served, session, signOut);
+    return renderPromote(lifecycle, cfg, chrome, served, getSession, signOut);
   }
 
   const self = cfg.auth?.self;
@@ -1084,7 +1086,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       ? JSON.parse(text)
       : (await import("./vendor/js-yaml.js")).load(text);
     // Row attachments are paid for by an app that declares a cortex, and by no
-    // other. (cortex-navigation is not lazy: the session lifecycle is the shell's.)
+    // other. (cortex-navigation loads only for a cortex or an auth: see needsLifecycle.)
     const rowAttachments = cfg.cortex === undefined ? undefined : (await import("./row-attachments.js")).createRowAttachments(Object.fromEntries(Object.entries(cfg.cortex.actors ?? {}).filter(([, binding]) => binding.via === "rows")));
     // A served document's head already says what it is.
     if (served === null) document.title = appTitle(cfg);
@@ -1238,11 +1240,16 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       }
     }
 
+    // The session as it stands when asked, a guest minted since the render included.
+    const currentSession = () => session ?? guestSession ?? Promise.resolve(null);
     let nav = null;
     let signOut = null;
     let localizeCurrentStrip = null;
     // cortex-navigation.js (xstate) is loaded lazily: only when the app declares a cortex or
     // auth. A plain app with neither skips the ~85 kB vendor/xstate.js payload entirely.
+    // Screen machines load xstate through machine-engine.js and never pass through
+    // cortex-navigation.js. A tables-only app does mint a guest with neither set; that session
+    // has no lifecycle, which is why every use of it below is guarded.
     const needsLifecycle = cfg.cortex !== undefined || cfg.auth !== undefined;
     const lifecycleModule = needsLifecycle ? await import("./cortex-navigation.js") : null;
     const createSessionLifecycleFn = lifecycleModule?.createSessionLifecycle ?? null;
@@ -1410,7 +1417,9 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       // The provider's cookie first, or the reload adopts the session again;
       // a sign-out that cannot reach the auth service leaves the reader signed
       // in, and on screen as they were.
-      const outcome = await sessionLifecycle.signOut();
+      // A tables-only app has a guest and no lifecycle (neither auth nor cortex loads it): its sign-out
+      // is the reload, with nothing at a provider to reach first.
+      const outcome = sessionLifecycle ? await sessionLifecycle.signOut() : { mode: "reload" };
       if (!outcome || outcome.mode === "busy" || outcome.mode === "stopped") return;
       if (outcome.mode === "in-place") {
         session = outcome.session;
@@ -1446,20 +1455,20 @@ export async function createShell({ config, mount, preload = true, hostDomModule
       else mount.before(nav);
       const servedBox = kept?.querySelector(":scope > .shell-me") ?? null;
       if (session) {
-        const box = renderSession(session, cfg, store, signOut, chrome, servedBox, sessionLifecycle);
+        const box = renderSession(session, cfg, store, signOut, chrome, servedBox, sessionLifecycle, currentSession);
         if (box !== servedBox) {
           servedBox?.remove();
           nav.append(box);
         }
       } else if (mintedGuest && offersGuest(cfg)) {
-        const box = renderPromote(sessionLifecycle, cfg, chrome, servedBox, null, signOut);
+        const box = renderPromote(sessionLifecycle, cfg, chrome, servedBox, currentSession, signOut);
         if (box !== servedBox) {
           servedBox?.remove();
           nav.append(box);
         }
       } else if (mintedGuest) {
         guestSession = guestSession.then((s) => {
-          const box = renderSession(s, cfg, store, signOut, chrome, servedBox, sessionLifecycle);
+          const box = renderSession(s, cfg, store, signOut, chrome, servedBox, sessionLifecycle, currentSession);
           if (box !== servedBox) {
             servedBox?.remove();
             nav.append(box);
@@ -1474,7 +1483,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
     } else servedStrip?.remove();
 
     const runPasskeyAuth = async (button, kind) => {
-      if (sessionLifecycle.busy()) return;
+      if (!sessionLifecycle || sessionLifecycle.busy()) return;
       const existingFeedback = button?.closest?.("[data-auth-feedback]") ?? null;
       const container = existingFeedback?.parentElement ?? button?.parentElement ?? null;
       existingFeedback?.remove();
@@ -1551,7 +1560,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         session = next;
         if (nav) {
           const oldBox = nav.querySelector(":scope > .shell-me");
-          const nextBox = renderSession(next, cfg, store, signOut, chrome, null, sessionLifecycle);
+          const nextBox = renderSession(next, cfg, store, signOut, chrome, null, sessionLifecycle, currentSession);
           if (oldBox) oldBox.replaceWith(nextBox);
           else nav.append(nextBox);
           localizeCurrentStrip();
@@ -1567,7 +1576,7 @@ export async function createShell({ config, mount, preload = true, hostDomModule
         if (providerEl.localName !== "label") e.preventDefault();
         if (sessionLifecycle?.busy()) return;
         if (cfg.auth?.adoptGuest) {
-          await adoptGuestSafe(cfg, () => session ?? guestSession ?? Promise.resolve(null), globalThis.fetch);
+          await adoptGuestSafe(cfg, currentSession, globalThis.fetch);
         }
         const provider = providerEl.dataset.authProvider;
         const here = `${location.pathname ?? "/"}${location.search ?? ""}${location.hash ?? ""}`;
